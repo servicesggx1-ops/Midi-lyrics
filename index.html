@@ -1962,5 +1962,25 @@ if("serviceWorker" in navigator && location.protocol.startsWith("http")){
 /* départ */
 sizeCanvas();
 </script>
+<script>
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.getRegistrations().then(rs=>{
+    rs.forEach(r=>{
+      r.update();
+      r.addEventListener("updatefound",()=>{
+        const w=r.installing;
+        if(!w) return;
+        w.addEventListener("statechange",()=>{
+          if(w.state==="installed" && navigator.serviceWorker.controller){
+            caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k))))
+              .then(()=>location.reload(true));
+          }
+        });
+      });
+    });
+  });
+}
+</script>
+
 </body>
 </html>
