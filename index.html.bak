@@ -1875,53 +1875,7 @@ async function trackMelody(x, sr, onProgress){
   return notes;
 }
 
-const CH_NAMES=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-function detectChords(x, sr){
-  const W=8192, HOP=Math.round(sr*0.1), out=[];
-  const re=new Float32Array(W), im=new Float32Array(W);
-  const maj=[0,4,7], min=[0,3,7];
-  for(let off=0; off+W<x.length; off+=HOP){
-    for(let i=0;i<W;i++){ re[i]=x[off+i]*(0.5-0.5*Math.cos(2*Math.PI*i/W)); im[i]=0; }
-    fftIP(re,im,W);
-    const ch=new Float32Array(12);
-    for(let k=1;k<W/2;k++){
-      const fq=k*sr/W; if(fq<73||fq>1568) continue;
-      const m=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
-      ch[((Math.round(12*Math.log2(fq/440))+69)%12+12)%12]+=m;
-    }
-    let s=0; for(let i=0;i<12;i++) s+=ch[i];
-    if(s<1e-6){ out.push(null); continue; }
-    for(let i=0;i<12;i++) ch[i]/=s;
-    let bn=null, bs=-1;
-    for(let r=0;r<12;r++){
-      for(const[tp,sfx]of[[maj,""],[min,"m"]]){
-        let sc=0; for(const d of tp) sc+=ch[(r+d)%12];
-        if(sc>bs){ bs=sc; bn=CH_NAMES[r]+sfx; }
-      }
-    }
-    out.push(bs>0.42?bn:null);
-  }
-  const seg=[], MIN=Math.ceil(0.5/(HOP/sr));
-  let cur=null, st=0;
-  out.forEach((c,i)=>{ if(c!==cur){ if(cur&&i-st>=MIN) seg.push({t:st*HOP/sr,d:(i-st)*HOP/sr,c:cur}); cur=c; st=i; } });
-  if(cur&&out.length-st>=MIN) seg.push({t:st*HOP/sr,d:(out.length-st)*HOP/sr,c:cur});
-  return seg;
-}
-function fftIP(re,im,n){
-  for(let i=1,j=0;i<n;i++){ let b=n>>1; for(;j&b;b>>=1) j^=b; j^=b;
-    if(i<j){ [re[i],re[j]]=[re[j],re[i]]; [im[i],im[j]]=[im[j],im[i]]; } }
-  for(let len=2;len<=n;len<<=1){ const a=-2*Math.PI/len;
-    for(let i=0;i<n;i+=len){ for(let k=0;k<len/2;k++){
-      const wr=Math.cos(a*k), wi=Math.sin(a*k);
-      const ur=re[i+k], ui=im[i+k];
-      const vr=re[i+k+len/2]*wr-im[i+k+len/2]*wi;
-      const vi=re[i+k+len/2]*wi+im[i+k+len/2]*wr;
-      re[i+k]=ur+vr; im[i+k]=ui+vi;
-      re[i+k+len/2]=ur-vr; im[i+k+len/2]=ui-vi;
-    } } }
-}
-
-
+__CHORDS_SLOT__
 
 /* ============================================================
    12. Raccourci/* ============================================================
