@@ -212,9 +212,11 @@ a{color:var(--head)}
           <button id="isolate" class="btn-sm primary">Isoler le chant</button>
           <button id="reScan" class="btn-sm hide">Relever la sélection</button>
           <button id="allOn" class="btn-sm ghost">Tout réactiver</button>
+          <button id="chordBtn" class="btn-sm">Accords (audio)</button>
         </div>
       </div>
       <div class="tracks" id="tracks"></div>
+      <div class="lyr mono" id="chordOut"></div>
       <p class="note">S = solo (n'entendre que celle-ci) · M = coupé. « Dessus » ne garde que la
          note la plus haute à chaque instant — c'est ce qui sort une mélodie propre d'une piste
          d'accords ou d'une transcription automatique. Ce que tu entends est exporté tel quel.</p>
@@ -1449,6 +1451,24 @@ $("isolate").onclick = () => {
       + "(ligne la plus monophonique et la plus aiguë). Change de piste si ce n'est pas le chant.";
 };
 $("allOn").onclick = () => { S.parts.forEach(p => { p.solo = false; p.mute = false; }); afterMix(); };
+$("chordBtn").onclick = async () => {
+  const out = $("chordOut");
+  if(!S.mono){ out.textContent = "Charge d'abord un fichier audio (mp3/wav)."; return; }
+  out.textContent = "Analyse des accords…";
+  await new Promise(r => setTimeout(r, 30));
+  try{
+    const seg = detectChords(S.mono, TRACK_SR);
+    if(!seg.length){ out.textContent = "Aucun accord franc détecté."; return; }
+    const tal = {};
+    seg.forEach(s => { tal[s.c] = (tal[s.c]||0) + s.d; });
+    const key = Object.keys(tal).sort((a,b) => tal[b]-tal[a])[0];
+    const fm = t => Math.floor(t/60) + ":" + String(Math.floor(t%60)).padStart(2,"0");
+    out.innerHTML = '<div style="margin-bottom:6px"><b>Tonalité probable : ' + key +
+      '</b> · ' + seg.length + ' segments</div>' +
+      seg.map(s => fm(s.t) + "  " + s.c).join("<br>");
+  }catch(e){ out.textContent = "Erreur : " + e.message; }
+};
+
 $("timbre").onchange = () => {
   const v = $("timbre").value;
   const anySolo = S.parts.some(p => p.solo);
