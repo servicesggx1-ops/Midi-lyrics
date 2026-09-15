@@ -1960,6 +1960,24 @@ if("serviceWorker" in navigator && location.protocol.startsWith("http")){
 }
 
 /* départ */
+document.getElementById("vocalInstruBtn").onclick = async () => { 
+    const start = parseFloat(document.getElementById("startS").value || 0); 
+    const end = parseFloat(document.getElementById("endS").value || 16); 
+    const duration = end - start; 
+    const rate = originalBuffer.sampleRate; 
+    const segment = new AudioContext().createBuffer(originalBuffer.numberOfChannels, duration * rate, rate); 
+    for (let i = 0; i < originalBuffer.numberOfChannels; i++) { 
+        segment.copyToChannel(originalBuffer.getChannelData(i).slice(start * rate, end * rate), i); 
+    } 
+    const wavBlob = await bufferToWav(segment); 
+    const formData = new FormData(); 
+    formData.append("file", wavBlob, "clip.wav"); 
+    const res = await fetch("https://ggx.tail42aa28.ts.net/forge/vocal-to-instru", { method: "POST", body: formData }); 
+    const midiBlob = await res.blob(); 
+    const url = URL.createObjectURL(midiBlob); 
+    const a = document.createElement("a"); 
+    a.href = url; a.download = "lyrics_instru_16s.mid"; a.click(); 
+};
 sizeCanvas();
 </script>
 <script>
