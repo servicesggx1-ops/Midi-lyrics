@@ -1,4 +1,4 @@
-const CACHE = "midilyrics-v2";
+const CACHE = "ggx-v21-banque";
 const ASSETS = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (e) => {

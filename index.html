@@ -2533,6 +2533,20 @@ if("serviceWorker" in navigator && location.protocol.startsWith("http")){
 
 /* départ */
 sizeCanvas();
+/* banque Termux (ggx v21) : ?banque=<fichier> → servi par 127.0.0.1:8765 sur le téléphone */
+(async () => {
+  const nom = new URLSearchParams(location.search).get("banque");
+  if(!nom || /[\/\\]/.test(nom)) return;
+  history.replaceState(null, "", location.pathname);
+  try{
+    const r = await fetch("http://127.0.0.1:8765/" + encodeURIComponent(nom), {cache:"no-store"});
+    if(!r.ok) throw new Error("réponse " + r.status);
+    await openBuffer(await r.arrayBuffer(), nom);
+  }catch(err){
+    showErr("Banque Termux injoignable (" + (err && err.message ? err.message : err) +
+            ") — dans Termux, tape « midi » puis le numéro du morceau.");
+  }
+})();
 </script>
 </body>
 </html>
