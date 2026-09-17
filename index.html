@@ -2548,5 +2548,186 @@ sizeCanvas();
   }
 })();
 </script>
+<!-- GGX-ML1 début -->
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   COUCHE ML1 — EXPORT PAR PISTE (ML1v1 · GGX v32) · additive, aucune ligne du socle modifiée
+     1. Bouton « ⬇ MP3 » sur chaque piste : exporte CETTE piste seule
+        (Guitare, Basse…), quel que soit l'état S / M, sur la sélection Début→Fin
+     2. Bouton « Chaque piste → un fichier » : une piste = un fichier
+     3. Rendu par tranches de 20 s + encodage au fil de l'eau : un morceau
+        entier ne sature plus la mémoire du téléphone (cause probable des
+        exports qui échouaient)
+     4. « Exporter la sélection » passe par le même moteur (même règle S / M)
+   ═══════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  try{
+    if(typeof S!=='object'||typeof $!=='function'||typeof renderTracks!=='function'||typeof buildGraph!=='function'
+       ||typeof scheduleNote!=='function'||typeof slug!=='function'||!$('exportBtn')||!$('fmt'))
+      throw 0;
+  }catch(e){console.warn('GGX ML1 : socle Midi-lyrics inattendu — couche inactive');return;}
+
+  const SR=44100, PAS=20, AVANT=4, QUEUE=0.5;
+  const lim=(v,a,b)=>v<a?a:v>b?b:v;
+
+  function dl(blob,nom){
+    const u=URL.createObjectURL(blob), a=document.createElement('a');
+    a.href=u;a.download=nom;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),120000);
+  }
+  function dire(m,c){const st=$('expStatus');if(!st)return;st.className='status'+(c?' '+c:'');st.textContent=m;}
+  function bornes(){
+    const a=lim(parseFloat($('inA').value)||0,0,S.duration);
+    const b=lim(parseFloat($('inB').value)||S.duration,0,S.duration);
+    return [a,b];
+  }
+  const pause=()=>new Promise(r=>setTimeout(r,0));
+
+  /* rendu d'une liste de pistes, tranche par tranche ; sortie(L,R) reçoit chaque morceau */
+  async function rendre(parts,a,b,niveau,sortie,prog){
+    const OAC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+    const fin=b+QUEUE;
+    for(let s0=a;s0<fin-1e-6;s0+=PAS){
+      const s1=Math.min(fin,s0+PAS);
+      const w0=Math.max(a,s0-AVANT);                 /* amorce jetée ensuite */
+      const len=Math.ceil((s1-w0)*SR);
+      const oc=new OAC(2,len,SR);
+      const g=buildGraph(oc,parts,niveau);
+      parts.forEach((p,i)=>{
+        if(g.gains[i].gain.value<=0)return;
+        p.notes.forEach(n=>{
+          const e=n.t+n.d;
+          if(e<=w0||n.t>=s1||n.t>=b||e<=a)return;
+          const deb=Math.max(n.t,w0);
+          const dur=Math.min(e,b+QUEUE)-deb;
+          if(dur<=0)return;
+          scheduleNote(oc,g.gains[i],p,deb-w0,Math.max(0.03,dur),n,null);
+        });
+      });
+      const buf=await oc.startRendering();
+      const saut=Math.round((s0-w0)*SR);
+      const nb=Math.min(buf.length-saut,Math.round((s1-s0)*SR));
+      await sortie(buf.getChannelData(0).subarray(saut,saut+nb),buf.getChannelData(1).subarray(saut,saut+nb));
+      if(prog)prog((s1-a)/(fin-a));
+      await pause();
+    }
+  }
+
+  async function fichier(parts,a,b,fmt,niveau,prog){
+    if(fmt==='wav'){
+      const morceaux=[];let total=0;
+      await rendre(parts,a,b,niveau,(L,R)=>{
+        const o=new Int16Array(L.length*2);
+        for(let i=0,k=0;i<L.length;i++){
+          let v=L[i]<-1?-1:L[i]>1?1:L[i];o[k++]=v<0?v*0x8000:v*0x7fff;
+          v=R[i]<-1?-1:R[i]>1?1:R[i];o[k++]=v<0?v*0x8000:v*0x7fff;
+        }
+        morceaux.push(o);total+=L.length;
+      },prog);
+      const h=new DataView(new ArrayBuffer(44));
+      const ws=(o,s)=>{for(let i=0;i<s.length;i++)h.setUint8(o+i,s.charCodeAt(i));};
+      ws(0,'RIFF');h.setUint32(4,36+total*4,true);ws(8,'WAVEfmt ');
+      h.setUint32(16,16,true);h.setUint16(20,1,true);h.setUint16(22,2,true);
+      h.setUint32(24,SR,true);h.setUint32(28,SR*4,true);h.setUint16(32,4,true);h.setUint16(34,16,true);
+      ws(36,'data');h.setUint32(40,total*4,true);
+      return {blob:new Blob([h.buffer,...morceaux],{type:'audio/wav'}),ext:'wav'};
+    }
+    if(!window.lamejs||!window.lamejs.Mp3Encoder)throw new Error('encodeur MP3 absent — choisis WAV');
+    const kbps=fmt==='mp3-320'?320:192;
+    const enc=new window.lamejs.Mp3Encoder(2,SR,kbps);
+    const out=[], B=1152, l=new Int16Array(B), r=new Int16Array(B);
+    await rendre(parts,a,b,niveau,async(L,R)=>{
+      for(let i=0;i<L.length;i+=B){
+        const n=Math.min(B,L.length-i);
+        for(let j=0;j<n;j++){let v=L[i+j]<-1?-1:L[i+j]>1?1:L[i+j];l[j]=v<0?v*0x8000:v*0x7fff;
+                             v=R[i+j]<-1?-1:R[i+j]>1?1:R[i+j];r[j]=v<0?v*0x8000:v*0x7fff;}
+        const m=enc.encodeBuffer(l.subarray(0,n),r.subarray(0,n));
+        if(m.length)out.push(new Uint8Array(m));
+        if((i/B)%200===0)await pause();
+      }
+    },prog);
+    const d=enc.flush();if(d.length)out.push(new Uint8Array(d));
+    return {blob:new Blob(out,{type:'audio/mpeg'}),ext:'mp3'};
+  }
+
+  let occupe=false;
+  async function exporter(parts,etiquette){
+    if(occupe){dire('Un export est déjà en cours…');return false;}
+    const [a,b]=bornes();
+    if(b-a<0.2){dire('La sélection est trop courte : place une fin après le début.','bad');return false;}
+    if(!parts.length||!parts.some(p=>p.notes&&p.notes.length)){dire('Rien à exporter : piste vide.','bad');return false;}
+    const fmt=$('fmt').value, niveau=parseFloat($('gain').value)||0.9;
+    occupe=true;
+    const btns=[...document.querySelectorAll('#exportBtn,#ggxAll,[data-ggxmp3]')];
+    btns.forEach(x=>x.disabled=true);
+    try{
+      const f=await fichier(parts,a,b,fmt,niveau,p=>dire('« '+etiquette+' » : '+Math.round(p*100)+' %'));
+      const nom=slug(S.fileName)+'_'+slug(etiquette)+'_'+a.toFixed(1).replace('.','-')+'-'+b.toFixed(1).replace('.','-')+'.'+f.ext;
+      dl(f.blob,nom);
+      dire(f.ext.toUpperCase()+' exporté : '+nom+' ('+Math.round(f.blob.size/1024)+' ko)','ok');
+      return true;
+    }catch(err){
+      dire('Export interrompu : '+(err&&err.message?err.message:err),'bad');
+      return false;
+    }finally{
+      occupe=false;btns.forEach(x=>x.disabled=false);
+    }
+  }
+  /* copie de la piste : entendue seule, sans toucher aux réglages S / M de l'écran */
+  const seule=p=>Object.assign({},p,{solo:false,mute:false});
+
+  /* 1 : un bouton par piste */
+  const _rt=renderTracks;
+  renderTracks=function(){
+    _rt.apply(this,arguments);
+    const rangs=document.querySelectorAll('#tracks .trk');
+    S.parts.forEach((p,k)=>{
+      const ctl=rangs[k]&&rangs[k].querySelector('.tctl');
+      if(!ctl||ctl.querySelector('[data-ggxmp3]'))return;
+      const bt=document.createElement('button');
+      bt.className='btn-sm';bt.dataset.ggxmp3=String(p.i);
+      bt.title='Exporter cette piste seule (format choisi dans Export)';
+      bt.textContent='⬇ '+(($('fmt')&&$('fmt').value==='wav')?'WAV':'MP3');
+      bt.onclick=()=>exporter([seule(p)],p.label);
+      ctl.appendChild(bt);
+    });
+  };
+
+  /* 4 : export principal = même moteur, même règle S / M */
+  $('exportBtn').onclick=()=>{
+    const solo=S.parts.some(p=>p.solo);
+    const live=S.parts.filter(p=>solo?p.solo:!p.mute);
+    if(!live.length){dire("Toutes les pistes sont coupées : il n'y a rien à exporter.",'bad');return;}
+    exporter(S.parts,live.length===1?live[0].label:'mix-'+live.length+'-pistes');
+  };
+
+  /* 2 : chaque piste → un fichier */
+  const hote=$('exportBtn')&&$('exportBtn').parentElement&&$('exportBtn').parentElement.parentElement;
+  if(hote){
+    const fld=document.createElement('div');fld.className='fld';
+    fld.innerHTML='<label>&nbsp;</label>';
+    const bt=document.createElement('button');bt.id='ggxAll';bt.style.width='100%';
+    bt.textContent='Chaque piste → un fichier';
+    bt.onclick=async()=>{
+      const liste=S.parts.filter(p=>p.notes&&p.notes.length);
+      for(let k=0;k<liste.length;k++){
+        dire('Piste '+(k+1)+'/'+liste.length+'…');
+        if(!await exporter([seule(liste[k])],liste[k].label))return;
+        await new Promise(r=>setTimeout(r,700));
+      }
+      dire(liste.length+' fichiers exportés — si Chrome demande « téléchargements multiples », autorise.','ok');
+    };
+    fld.appendChild(bt);hote.appendChild(fld);
+  }
+  const fm=$('fmt');
+  if(fm)fm.addEventListener('change',()=>document.querySelectorAll('[data-ggxmp3]').forEach(x=>x.textContent='⬇ '+(fm.value==='wav'?'WAV':'MP3')));
+  if(S.parts&&S.parts.length)renderTracks();
+  const t=document.querySelector('header.top p');
+  if(t)t.setAttribute('data-ggx','ML1');
+  console.info('GGX ML1 : export par piste actif');
+})();
+</script>
+<!-- GGX-ML1 fin -->
 </body>
 </html>
