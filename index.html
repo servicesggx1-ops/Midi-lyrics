@@ -2551,7 +2551,7 @@ sizeCanvas();
 <!-- GGX-ML1 début -->
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML1 — EXPORT PAR PISTE (ML1v2 · GGX v34) · additive, aucune ligne du socle modifiée
+   COUCHE ML1 — EXPORT PAR PISTE (ML1v3 · GGX v35) · additive, aucune ligne du socle modifiée
      1. Bouton « ⬇ MP3 » sur chaque piste : exporte CETTE piste seule
         (Guitare, Basse…), quel que soit l'état S / M, sur la sélection Début→Fin
      2. Bouton « Chaque piste → un fichier » : une piste = un fichier
@@ -2571,11 +2571,32 @@ sizeCanvas();
   const SR=44100, PAS=20, AVANT=4, QUEUE=0.5;
   const lim=(v,a,b)=>v<a?a:v>b?b:v;
 
+  /* téléchargement automatique + lien de secours à toucher (Android bloque parfois
+     un téléchargement lancé après un long calcul) */
+  const liens=[];
   function dl(blob,nom){
-    const u=URL.createObjectURL(blob), a=document.createElement('a');
-    a.href=u;a.download=nom;document.body.appendChild(a);a.click();a.remove();
-    setTimeout(()=>URL.revokeObjectURL(u),120000);
+    const u=URL.createObjectURL(blob);
+    try{const a=document.createElement('a');a.href=u;a.download=nom;document.body.appendChild(a);a.click();a.remove();}catch(e){}
+    let boite=document.getElementById('ggxLiens');
+    const st=$('expStatus');
+    if(!boite&&st&&st.parentElement){
+      boite=document.createElement('div');boite.id='ggxLiens';
+      boite.style.cssText='display:flex;flex-direction:column;gap:6px;margin-top:8px';
+      st.insertAdjacentElement('afterend',boite);
+    }
+    if(boite){
+      const l=document.createElement('a');
+      l.href=u;l.download=nom;l.className='btn-sm';
+      l.style.cssText='display:block;padding:10px;border:1px solid currentColor;border-radius:8px;text-decoration:none;word-break:break-all';
+      l.textContent='💾 Enregistrer « '+nom+' » ('+Math.max(1,Math.round(blob.size/1024))+' ko) — touche si rien n\'est arrivé';
+      boite.prepend(l);
+      liens.unshift({u,l});
+      while(liens.length>8){const x=liens.pop();x.l.remove();URL.revokeObjectURL(x.u);}
+    }else setTimeout(()=>URL.revokeObjectURL(u),600000);
   }
+  /* toute erreur pendant un export s'affiche dans la zone Export */
+  window.addEventListener('error',e=>{if(occupe)dire('Erreur : '+(e.message||e.type),'bad');});
+  window.addEventListener('unhandledrejection',e=>{if(occupe)dire('Erreur : '+((e.reason&&e.reason.message)||e.reason),'bad');});
   function dire(m,c){const st=$('expStatus');if(!st)return;st.className='status'+(c?' '+c:'');st.textContent=m;}
   function bornes(){
     const a=lim(parseFloat($('inA').value)||0,0,S.duration);
@@ -2662,10 +2683,12 @@ sizeCanvas();
     const btns=[...document.querySelectorAll('#exportBtn,#ggxAll,[data-ggxmp3]')];
     btns.forEach(x=>x.disabled=true);
     try{
+      dire('« '+etiquette+' » : préparation ('+(b-a).toFixed(1)+' s, '+fmt+')…');
+      const t0=performance.now();
       const f=await fichier(parts,a,b,fmt,niveau,p=>dire('« '+etiquette+' » : '+Math.round(p*100)+' %'));
       const nom=slug(S.fileName)+'_'+slug(etiquette)+'_'+a.toFixed(1).replace('.','-')+'-'+b.toFixed(1).replace('.','-')+'.'+f.ext;
       dl(f.blob,nom);
-      dire(f.ext.toUpperCase()+' exporté : '+nom+' ('+Math.round(f.blob.size/1024)+' ko)','ok');
+      dire(f.ext.toUpperCase()+' prêt : '+nom+' ('+Math.round(f.blob.size/1024)+' ko, '+((performance.now()-t0)/1000).toFixed(1)+' s) — rien téléchargé ? touche 💾 ci-dessous','ok');
       return true;
     }catch(err){
       dire('Export interrompu : '+(err&&err.message?err.message:err),'bad');
@@ -2731,7 +2754,7 @@ sizeCanvas();
 </script>
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML2 — PISTES SÉPARÉES (ML2v1 · GGX v34) · additive
+   COUCHE ML2 — PISTES SÉPARÉES (ML2v2 · GGX v35) · additive
      1. Bouton « ⬇ MID » sur chaque piste : cette piste seule en .mid
      2. .mid au VRAI tempo et à la vraie mesure du fichier (carte de tempo
         complète) : les mesures tombent juste dans Guitar Pro / un DAW
