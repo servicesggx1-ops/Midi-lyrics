@@ -2551,7 +2551,7 @@ sizeCanvas();
 <!-- GGX-ML1 début -->
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML1 — EXPORT PAR PISTE (ML1v1 · GGX v32) · additive, aucune ligne du socle modifiée
+   COUCHE ML1 — EXPORT PAR PISTE (ML1v2 · GGX v34) · additive, aucune ligne du socle modifiée
      1. Bouton « ⬇ MP3 » sur chaque piste : exporte CETTE piste seule
         (Guitare, Basse…), quel que soit l'état S / M, sur la sélection Début→Fin
      2. Bouton « Chaque piste → un fichier » : une piste = un fichier
@@ -2722,10 +2722,212 @@ sizeCanvas();
   }
   const fm=$('fmt');
   if(fm)fm.addEventListener('change',()=>document.querySelectorAll('[data-ggxmp3]').forEach(x=>x.textContent='⬇ '+(fm.value==='wav'?'WAV':'MP3')));
+  window.ggxML1={fichier,seule,bornes,dire,dl};
   if(S.parts&&S.parts.length)renderTracks();
   const t=document.querySelector('header.top p');
   if(t)t.setAttribute('data-ggx','ML1');
   console.info('GGX ML1 : export par piste actif');
+})();
+</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   COUCHE ML2 — PISTES SÉPARÉES (ML2v1 · GGX v34) · additive
+     1. Bouton « ⬇ MID » sur chaque piste : cette piste seule en .mid
+     2. .mid au VRAI tempo et à la vraie mesure du fichier (carte de tempo
+        complète) : les mesures tombent juste dans Guitar Pro / un DAW
+     3. « Exporter la sélection en .mid » passe par le même écrivain (règle S / M)
+     4. « Toutes les pistes → ZIP » : un seul téléchargement contenant, pour
+        chaque piste, l'audio (format choisi) + le .mid, plus le .mid complet
+   ═══════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  const M=window.ggxML1;
+  if(!M||typeof S!=='object'||typeof renderTracks!=='function'||!$('midBtn')){
+    console.warn('GGX ML2 : ML1 ou socle absent — couche inactive');return;
+  }
+  const TPQ=480;
+
+  /* ── carte de tempo : secondes ↔ ticks de sortie ── */
+  function carte(){
+    const m=S.midi;
+    if(!m||m.smpte||!m.tpq)return null;
+    const k=TPQ/m.tpq;
+    const t=(m.tempos||[]).slice().sort((a,b)=>a.tick-b.tick).map(x=>({tick:x.tick*k,us:x.us}));
+    if(!t.length||t[0].tick>0)t.unshift({tick:0,us:500000});
+    const pts=[];let sec=0;
+    for(let i=0;i<t.length;i++){
+      const spt=(t[i].us/1e6)/TPQ;
+      pts.push({tick:t[i].tick,sec,spt,us:t[i].us});
+      if(i+1<t.length)sec+=(t[i+1].tick-t[i].tick)*spt;
+    }
+    const sigs=(m.timeSigs||[]).slice().sort((a,b)=>a.tick-b.tick).map(x=>({tick:x.tick*k,num:x.num,den:x.den}));
+    return {pts,sigs,
+      tick(s){let lo=0,hi=pts.length-1;while(lo<hi){const mid=(lo+hi+1)>>1;if(pts[mid].sec<=s)lo=mid;else hi=mid-1;}
+              return pts[lo].tick+(s-pts[lo].sec)/pts[lo].spt;}};
+  }
+
+  /* ── écriture SMF type 1 ── */
+  function ecrireMidi(parts,a,b){
+    const c=carte();
+    const T=c?(s=>c.tick(s)):(s=>s*TPQ*2);          /* sans carte : 120 BPM, comme le socle */
+    const t0=T(a), fin=Math.round(T(b)-t0);
+    const vlq=(o,v)=>{v=Math.max(0,Math.round(v));const st=[v&0x7f];v=Math.floor(v/128);
+      while(v>0){st.unshift((v&0x7f)|0x80);v=Math.floor(v/128);}st.forEach(x=>o.push(x));};
+    const txt=s=>Array.from(new TextEncoder().encode(String(s).slice(0,120)));
+    const piste=evs=>{                      /* evs : {tick, data:[...]} */
+      evs.sort((x,y)=>x.tick-y.tick||x.ord-y.ord);
+      const o=[];let last=0;
+      evs.forEach(e=>{vlq(o,e.tick-last);last=Math.max(last,e.tick);e.data.forEach(x=>o.push(x&0xff));});
+      vlq(o,Math.max(0,fin-last));o.push(0xff,0x2f,0x00);
+      return o;
+    };
+    /* piste 0 : nom, tempo, mesure */
+    const e0=[];
+    const nom=txt(S.fileName||'export');
+    e0.push({tick:0,ord:0,data:[0xff,0x03,...(()=>{const o=[];vlq(o,nom.length);return o;})(),...nom]});
+    if(c){
+      let cur=c.pts[0];
+      c.pts.forEach(p=>{if(p.tick<=t0)cur=p;});
+      const tp=(tick,us)=>({tick,ord:1,data:[0xff,0x51,0x03,(us>>16)&0xff,(us>>8)&0xff,us&0xff]});
+      e0.push(tp(0,cur.us));
+      c.pts.forEach(p=>{if(p.tick>t0&&p.tick<t0+fin)e0.push(tp(Math.round(p.tick-t0),p.us));});
+      let sg=null;c.sigs.forEach(x=>{if(x.tick<=t0)sg=x;});
+      const ts=(tick,x)=>({tick,ord:2,data:[0xff,0x58,0x04,x.num&0xff,Math.round(Math.log2(x.den))&0xff,24,8]});
+      if(sg)e0.push(ts(0,sg));
+      c.sigs.forEach(x=>{if(x.tick>t0&&x.tick<t0+fin)e0.push(ts(Math.round(x.tick-t0),x));});
+    }else{
+      e0.push({tick:0,ord:1,data:[0xff,0x51,0x03,0x07,0xa1,0x20]});
+    }
+    const pistes=[piste(e0)];
+    let libre=0;
+    parts.forEach(p=>{
+      const ch=p.drum?9:(()=>{if(libre===9)libre++;return (libre++)%16;})();
+      const prog=(p.progOverride==null?p.prog:p.progOverride)&0x7f;
+      const evs=[];
+      const n2=txt(p.label||'piste');
+      const lenb=[];vlq(lenb,n2.length);
+      evs.push({tick:0,ord:0,data:[0xff,0x03,...lenb,...n2]});
+      if(!p.drum)evs.push({tick:0,ord:1,data:[0xc0|ch,prog]});
+      p.notes.forEach(n=>{
+        const e=n.t+n.d;
+        if(e<=a||n.t>=b)return;
+        const on=Math.max(0,Math.round(T(Math.max(n.t,a))-t0));
+        const off=Math.max(on+10,Math.round(T(Math.min(e,b))-t0));
+        const v=Math.max(1,Math.min(127,Math.round(n.v*127)));
+        evs.push({tick:on,ord:3,data:[0x90|ch,n.p&0x7f,v]});
+        evs.push({tick:off,ord:2,data:[0x80|ch,n.p&0x7f,0]});
+      });
+      if(evs.length>2)pistes.push(piste(evs));
+    });
+    const out=[0x4d,0x54,0x68,0x64,0,0,0,6,0,1,(pistes.length>>8)&0xff,pistes.length&0xff,TPQ>>8,TPQ&0xff];
+    pistes.forEach(t=>{out.push(0x4d,0x54,0x72,0x6b,(t.length>>>24)&0xff,(t.length>>>16)&0xff,(t.length>>>8)&0xff,t.length&0xff);
+      for(let i=0;i<t.length;i++)out.push(t[i]);});
+    return new Blob([new Uint8Array(out)],{type:'audio/midi'});
+  }
+  window.ggxEcrireMidi=ecrireMidi;
+
+  /* ── ZIP sans compression (un seul téléchargement) ── */
+  const CRC=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xedb88320^(c>>>1):c>>>1;t[n]=c>>>0;}return t;})();
+  async function zip(fichiers,prog){
+    const parts=[],central=[];let off=0;
+    const le=(n,b)=>{const a=[];for(let i=0;i<b;i++)a.push((n>>>(8*i))&0xff);return a;};
+    const d=new Date();
+    const dt=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate();
+    const tm=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
+    for(let i=0;i<fichiers.length;i++){
+      const f=fichiers[i];
+      const data=new Uint8Array(await f.blob.arrayBuffer());
+      let c=0xffffffff;for(let j=0;j<data.length;j++){c=CRC[(c^data[j])&0xff]^(c>>>8);if((j&0xfffff)===0&&j)await new Promise(r=>setTimeout(r,0));}
+      c=(c^0xffffffff)>>>0;
+      const nom=new TextEncoder().encode(f.nom);
+      const loc=new Uint8Array([0x50,0x4b,3,4,20,0,0,8,0,0,...le(tm,2),...le(dt,2),...le(c,4),...le(data.length,4),...le(data.length,4),...le(nom.length,2),0,0,...nom]);
+      central.push(new Uint8Array([0x50,0x4b,1,2,20,0,20,0,0,8,0,0,...le(tm,2),...le(dt,2),...le(c,4),...le(data.length,4),...le(data.length,4),
+        ...le(nom.length,2),0,0,0,0,0,0,0,0,0,0,0,0,...le(off,4),...nom]));
+      parts.push(loc,data);off+=loc.length+data.length;
+      if(prog)prog(i+1,fichiers.length);
+    }
+    const tailleC=central.reduce((s,x)=>s+x.length,0);
+    const eocd=new Uint8Array([0x50,0x4b,5,6,0,0,0,0,...le(central.length,2),...le(central.length,2),...le(tailleC,4),...le(off,4),0,0]);
+    return new Blob([...parts,...central,eocd],{type:'application/zip'});
+  }
+
+  const nomDe=(etiq,a,b,ext)=>slug(S.fileName)+'_'+slug(etiq)+'_'+a.toFixed(1).replace('.','-')+'-'+b.toFixed(1).replace('.','-')+'.'+ext;
+  const pleines=()=>S.parts.filter(p=>p.notes&&p.notes.length);
+
+  function midiUne(p){
+    const [a,b]=M.bornes();
+    if(b-a<0.2){M.dire('La sélection est trop courte.','bad');return;}
+    const nom=nomDe(p.label,a,b,'mid');
+    M.dl(ecrireMidi([M.seule(p)],a,b),nom);
+    M.dire('MIDI écrit : '+nom+(carte()?' — tempo et mesure du fichier':' — 120 BPM (fichier sans carte de tempo)'),'ok');
+  }
+
+  /* 1 : bouton ⬇ MID par piste */
+  const _rt=renderTracks;
+  renderTracks=function(){
+    _rt.apply(this,arguments);
+    const rangs=document.querySelectorAll('#tracks .trk');
+    S.parts.forEach((p,k)=>{
+      const ctl=rangs[k]&&rangs[k].querySelector('.tctl');
+      if(!ctl||ctl.querySelector('[data-ggxmid]'))return;
+      const bt=document.createElement('button');
+      bt.className='btn-sm';bt.dataset.ggxmid=String(p.i);
+      bt.title='Cette piste seule en .mid (tempo du fichier)';
+      bt.textContent='⬇ MID';
+      bt.onclick=()=>midiUne(p);
+      ctl.appendChild(bt);
+    });
+  };
+
+  /* 3 : export .mid principal au vrai tempo */
+  $('midBtn').onclick=()=>{
+    const [a,b]=M.bornes();
+    const solo=S.parts.some(p=>p.solo);
+    const live=S.parts.filter(p=>solo?p.solo:!p.mute);
+    if(b-a<0.2||!live.length){M.dire('Rien à écrire : vérifie la sélection et les pistes actives.','bad');return;}
+    const nom=nomDe(live.length===1?live[0].label:'mix',a,b,'mid');
+    M.dl(ecrireMidi(live,a,b),nom);
+    M.dire('MIDI écrit : '+nom+' — un instrument par piste'+(carte()?', tempo et mesure du fichier':''),'ok');
+  };
+
+  /* 4 : tout en ZIP */
+  const hote=$('midBtn').parentElement&&$('midBtn').parentElement.parentElement;
+  if(hote){
+    const fld=document.createElement('div');fld.className='fld';fld.innerHTML='<label>&nbsp;</label>';
+    const bt=document.createElement('button');bt.id='ggxZip';bt.className='primary';bt.style.width='100%';
+    bt.textContent='Toutes les pistes → ZIP (audio + MID)';
+    bt.onclick=async()=>{
+      const [a,b]=M.bornes();
+      const liste=pleines();
+      if(b-a<0.2||!liste.length){M.dire('Rien à exporter : sélection ou pistes vides.','bad');return;}
+      const fmt=$('fmt').value, niveau=parseFloat($('gain').value)||0.9;
+      if(fmt==='wav'&&(b-a)*liste.length>900&&!confirm('WAV pour '+liste.length+' pistes : fichier très lourd. Continuer ? (MP3 conseillé)'))return;
+      const tous=[...document.querySelectorAll('#exportBtn,#ggxAll,#ggxZip,#midBtn,[data-ggxmp3],[data-ggxmid]')];
+      tous.forEach(x=>x.disabled=true);
+      try{
+        const fichiers=[];
+        const dossier=slug(S.fileName)+'_pistes/';
+        for(let k=0;k<liste.length;k++){
+          const p=liste[k];
+          const f=await M.fichier([M.seule(p)],a,b,fmt,niveau,
+            x=>M.dire('Piste '+(k+1)+'/'+liste.length+' « '+p.label+' » : '+Math.round(x*100)+' %'));
+          const n=String(k+1).padStart(2,'0')+'_'+slug(p.label);
+          fichiers.push({nom:dossier+n+'.'+f.ext,blob:f.blob});
+          fichiers.push({nom:dossier+n+'.mid',blob:ecrireMidi([M.seule(p)],a,b)});
+        }
+        fichiers.push({nom:dossier+'00_toutes-les-pistes.mid',blob:ecrireMidi(liste,a,b)});
+        const z=await zip(fichiers,(i,n)=>M.dire('Assemblage du ZIP… '+i+'/'+n));
+        const nom=slug(S.fileName)+'_pistes_'+a.toFixed(1).replace('.','-')+'-'+b.toFixed(1).replace('.','-')+'.zip';
+        M.dl(z,nom);
+        M.dire('ZIP exporté : '+nom+' — '+liste.length+' pistes, '+fichiers.length+' fichiers ('+Math.round(z.size/1024)+' ko)','ok');
+      }catch(err){
+        M.dire('Export interrompu : '+(err&&err.message?err.message:err),'bad');
+      }finally{tous.forEach(x=>x.disabled=false);}
+    };
+    fld.appendChild(bt);hote.appendChild(fld);
+  }
+  if(S.parts&&S.parts.length)renderTracks();
+  console.info('GGX ML2 : pistes séparées actives');
 })();
 </script>
 <!-- GGX-ML1 fin -->
