@@ -2551,7 +2551,7 @@ sizeCanvas();
 <!-- GGX-ML1 début -->
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML1 — EXPORT PAR PISTE (ML1v3 · GGX v35) · additive, aucune ligne du socle modifiée
+   COUCHE ML1 — EXPORT PAR PISTE (ML1v4 · GGX v41) · additive, aucune ligne du socle modifiée
      1. Bouton « ⬇ MP3 » sur chaque piste : exporte CETTE piste seule
         (Guitare, Basse…), quel que soit l'état S / M, sur la sélection Début→Fin
      2. Bouton « Chaque piste → un fichier » : une piste = un fichier
@@ -2951,6 +2951,145 @@ sizeCanvas();
   }
   if(S.parts&&S.parts.length)renderTracks();
   console.info('GGX ML2 : pistes séparées actives');
+})();
+</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   COUCHE ML3 — LOW-END SEED (ML3v1 · GGX v41) · additive
+     1. Banque de RÉGLAGES (zéro échantillon) : 4 timbres graves décrits
+        par des nombres — passe-bas, low-shelf, gain, registre cible
+     2. Repliement d'octave : la mélodie garde ses notes, ramenées dans
+        le registre choisi (le .mid exporté reste au ton d'origine : voulu)
+     3. Injection légale : window.buildGraph (chaîne grave sur « dest »)
+        et window.scheduleNote (hauteur). PATCH, freqOf et S jamais réassignés
+     4. Les pistes de batterie sortent avant tout traitement
+   ═══════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if(typeof S!=='object' || typeof buildGraph!=='function' || typeof scheduleNote!=='function' || typeof $!=='function'){
+    console.warn('GGX ML3 : socle absent — couche inactive'); return;
+  }
+  const CLE='ggx.ml3.seed';
+
+  /* ── BANQUE DE RÉGLAGES (aucun échantillon : que des nombres) ── */
+  const BANQUE={
+    'bas-medium':{lo:36,hi:48,lp:700,sf:120,sg:3,g:0.95,t:'bas-médium chantant'},
+    'sub-house': {lo:24,hi:36,lp:180,sf:70, sg:6,g:1.15,t:'sub House'},
+    'reese':     {lo:28,hi:40,lp:320,sf:90, sg:4,g:1.00,t:'Reese large'},
+    '808':       {lo:24,hi:38,lp:140,sf:55, sg:8,g:1.20,t:'808 profonde'}
+  };
+  function lire(){ try{ const t=localStorage.getItem(CLE); return t?JSON.parse(t):{}; }catch(e){ return {}; } }
+  function ecrire(){ try{ localStorage.setItem(CLE,JSON.stringify(ST)); }catch(e){} }
+  const ST=Object.assign({on:false,seed:'bas-medium',mode:'auto',pistes:'',lo:null,hi:null},lire());
+  if(!BANQUE[ST.seed]) ST.seed='bas-medium';
+
+  function reg(){
+    const b=BANQUE[ST.seed];
+    const lo=(ST.lo==null?b.lo:ST.lo|0);
+    let hi=(ST.hi==null?b.hi:ST.hi|0);
+    if(hi<lo+11) hi=lo+11;
+    return {lo:lo,hi:hi,lp:b.lp,sf:b.sf,sg:b.sg,g:b.g};
+  }
+  const NOMS=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const nom=p=>NOMS[((p%12)+12)%12]+(Math.floor(p/12)-1);
+
+  /* ── repliement d'octave : garde la classe de hauteur ── */
+  function plier(p){
+    const r=reg();
+    let q=r.lo+((((p|0)-r.lo)%12)+12)%12;
+    while(q+12<=r.hi && q+12<=p) q+=12;
+    return q<0?0:(q>127?127:q);
+  }
+  function numeros(){ return String(ST.pistes||'').split(/[^0-9]+/).filter(Boolean).map(Number); }
+  function cible(p,i){
+    if(!p || p.drum) return false;
+    if(ST.mode==='tout') return true;
+    if(ST.mode==='liste') return numeros().indexOf(i+1)>=0;
+    const prog=(p.progOverride==null?p.prog:p.progOverride)|0;
+    return (prog>>3)===4;
+  }
+  /* ── chaîne grave insérée sur dest : aucun oscillateur recopié ── */
+  function chaine(ctx){
+    const r=reg();
+    const lp=ctx.createBiquadFilter(); lp.type='lowpass';
+    lp.frequency.value=Math.min(r.lp,ctx.sampleRate/2-1000); lp.Q.value=0.7;
+    const sh=ctx.createBiquadFilter(); sh.type='lowshelf';
+    sh.frequency.value=r.sf; sh.gain.value=r.sg;
+    const gn=ctx.createGain(); gn.gain.value=r.g;
+    lp.connect(sh); sh.connect(gn);
+    return {entree:lp,sortie:gn};
+  }
+
+  const bg=buildGraph, sn=scheduleNote;
+  window.buildGraph=function(ctx,parts,masterLevel){
+    const g=bg(ctx,parts,masterLevel);
+    if(!ST.on) return g;
+    try{
+      parts.forEach((p,i)=>{
+        if(!cible(p,i)) return;
+        const nd=g.gains&&g.gains[i]; if(!nd) return;
+        nd.disconnect();
+        const c=chaine(ctx);
+        nd.connect(c.entree); c.sortie.connect(g.comp);
+      });
+    }catch(e){ console.warn('GGX ML3 : chaîne non posée',e); }
+    return g;
+  };
+  window.scheduleNote=function(ctx,dest,part,when,dur,note,sink){
+    if(!ST.on || !part || part.drum) return sn(ctx,dest,part,when,dur,note,sink);
+    let i=-1; try{ i=S.parts.indexOf(part); }catch(e){}
+    if(!cible(part,i)) return sn(ctx,dest,part,when,dur,note,sink);
+    const n={}; for(const k in note) n[k]=note[k];
+    n.p=plier(note.p);
+    return sn(ctx,dest,part,when,dur,n,sink);
+  };
+
+  /* ── réglages à l'écran ── */
+  const anc=$('timbre');
+  if(!anc){ console.info('GGX ML3 : moteur posé, menu timbre absent'); return; }
+  const b=document.createElement('details');
+  b.id='ggxML3';
+  b.style.cssText='margin:.5rem 0;padding:.35rem .6rem;border:1px solid currentColor;border-radius:8px;font-size:.9rem;opacity:.95';
+  let opts='';
+  for(const k in BANQUE) opts+='<option value="'+k+'">'+BANQUE[k].t+'</option>';
+  b.innerHTML='<summary>🎚 Low-End Seed — graves</summary>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;margin-top:.45rem">'
+    +'<label><input type="checkbox" id="m3on"> actif</label>'
+    +'<select id="m3seed">'+opts+'</select>'
+    +'<select id="m3mode"><option value="auto">pistes de basse (auto)</option>'
+    +'<option value="tout">toutes sauf batterie</option>'
+    +'<option value="liste">pistes choisies</option></select>'
+    +'<input id="m3pistes" size="8" placeholder="1,3,5" style="display:none">'
+    +'<label>registre <input id="m3lo" type="number" min="12" max="84" style="width:4.2rem"></label>'
+    +'<label>à <input id="m3hi" type="number" min="23" max="96" style="width:4.2rem"></label>'
+    +'<span id="m3nom" style="opacity:.75"></span>'
+    +'<button id="m3raz" type="button">↺ banque</button>'
+    +'</div>'
+    +'<div style="margin-top:.35rem;opacity:.7;font-size:.82rem">Repliement d\'octave : la mélodie garde ses notes, ramenées dans le registre. '
+    +'Le .mid exporté reste au ton d\'origine (voulu) ; le WAV suit les graves.</div>';
+  (anc.closest('label,div,fieldset')||anc).insertAdjacentElement('afterend',b);
+
+  const E=id=>b.querySelector('#'+id);
+  function relancer(){ if(S.playing && typeof startPlayback==='function'){ try{ startPlayback(S.pos); }catch(e){} } }
+  function afficher(){
+    const r=reg();
+    E('m3on').checked=!!ST.on;
+    E('m3seed').value=ST.seed;
+    E('m3mode').value=ST.mode;
+    E('m3pistes').style.display=(ST.mode==='liste'?'':'none');
+    E('m3pistes').value=ST.pistes||'';
+    E('m3lo').value=r.lo; E('m3hi').value=r.hi;
+    E('m3nom').textContent=nom(r.lo)+' → '+nom(r.hi);
+  }
+  E('m3on').addEventListener('change',e=>{ ST.on=e.target.checked; ecrire(); afficher(); relancer(); });
+  E('m3seed').addEventListener('change',e=>{ ST.seed=e.target.value; ST.lo=null; ST.hi=null; ecrire(); afficher(); relancer(); });
+  E('m3mode').addEventListener('change',e=>{ ST.mode=e.target.value; ecrire(); afficher(); relancer(); });
+  E('m3pistes').addEventListener('change',e=>{ ST.pistes=e.target.value; ecrire(); relancer(); });
+  E('m3lo').addEventListener('change',e=>{ ST.lo=parseInt(e.target.value,10)||null; ecrire(); afficher(); relancer(); });
+  E('m3hi').addEventListener('change',e=>{ ST.hi=parseInt(e.target.value,10)||null; ecrire(); afficher(); relancer(); });
+  E('m3raz').addEventListener('click',()=>{ ST.lo=null; ST.hi=null; ecrire(); afficher(); relancer(); });
+  afficher();
+  console.info('GGX ML3 : Low-End Seed actif (banque de réglages, zéro échantillon)');
 })();
 </script>
 <!-- GGX-ML1 fin -->
