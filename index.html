@@ -2551,7 +2551,7 @@ sizeCanvas();
 <!-- GGX-ML1 début -->
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML1 — EXPORT PAR PISTE (ML1v4 · GGX v41) · additive, aucune ligne du socle modifiée
+   COUCHE ML1 — EXPORT PAR PISTE (ML1v7 · GGX v110) · additive, aucune ligne du socle modifiée
      1. Bouton « ⬇ MP3 » sur chaque piste : exporte CETTE piste seule
         (Guitare, Basse…), quel que soit l'état S / M, sur la sélection Début→Fin
      2. Bouton « Chaque piste → un fichier » : une piste = un fichier
@@ -2955,7 +2955,7 @@ sizeCanvas();
 </script>
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML3 — LOW-END SEED (ML3v1 · GGX v41) · additive
+   COUCHE ML3 — LOW-END SEED (ML3v2 · GGX v42) · additive
      1. Banque de RÉGLAGES (zéro échantillon) : 4 timbres graves décrits
         par des nombres — passe-bas, low-shelf, gain, registre cible
      2. Repliement d'octave : la mélodie garde ses notes, ramenées dans
@@ -2973,10 +2973,11 @@ sizeCanvas();
 
   /* ── BANQUE DE RÉGLAGES (aucun échantillon : que des nombres) ── */
   const BANQUE={
-    'bas-medium':{lo:36,hi:48,lp:700,sf:120,sg:3,g:0.95,t:'bas-médium chantant'},
-    'sub-house': {lo:24,hi:36,lp:180,sf:70, sg:6,g:1.15,t:'sub House'},
-    'reese':     {lo:28,hi:40,lp:320,sf:90, sg:4,g:1.00,t:'Reese large'},
-    '808':       {lo:24,hi:38,lp:140,sf:55, sg:8,g:1.20,t:'808 profonde'}
+    'sub-200':   {lo:36,hi:48,lp:200,hp:30,raide:true,sf:60, sg:5,g:1.10,t:'sub-200 chirurgical'},
+    'bas-medium':{lo:36,hi:48,lp:700,hp:30,sf:120,sg:3,g:0.95,t:'bas-médium chantant'},
+    'sub-house': {lo:24,hi:36,lp:180,hp:28,sf:70, sg:6,g:1.15,t:'sub House'},
+    'reese':     {lo:28,hi:40,lp:320,hp:30,sf:90, sg:4,g:1.00,t:'Reese large'},
+    '808':       {lo:24,hi:38,lp:140,hp:25,sf:55, sg:8,g:1.20,t:'808 profonde'}
   };
   function lire(){ try{ const t=localStorage.getItem(CLE); return t?JSON.parse(t):{}; }catch(e){ return {}; } }
   function ecrire(){ try{ localStorage.setItem(CLE,JSON.stringify(ST)); }catch(e){} }
@@ -2988,7 +2989,7 @@ sizeCanvas();
     const lo=(ST.lo==null?b.lo:ST.lo|0);
     let hi=(ST.hi==null?b.hi:ST.hi|0);
     if(hi<lo+11) hi=lo+11;
-    return {lo:lo,hi:hi,lp:b.lp,sf:b.sf,sg:b.sg,g:b.g};
+    return {lo:lo,hi:hi,lp:b.lp,hp:(b.hp||30),raide:!!b.raide,sf:b.sf,sg:b.sg,g:b.g};
   }
   const NOMS=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const nom=p=>NOMS[((p%12)+12)%12]+(Math.floor(p/12)-1);
@@ -3016,8 +3017,16 @@ sizeCanvas();
     const sh=ctx.createBiquadFilter(); sh.type='lowshelf';
     sh.frequency.value=r.sf; sh.gain.value=r.sg;
     const gn=ctx.createGain(); gn.gain.value=r.g;
-    lp.connect(sh); sh.connect(gn);
-    return {entree:lp,sortie:gn};
+    const hp=ctx.createBiquadFilter(); hp.type='highpass';
+    hp.frequency.value=r.hp; hp.Q.value=0.7;
+    let der=lp; hp.connect(lp);
+    if(r.raide){
+      const lp2=ctx.createBiquadFilter(); lp2.type='lowpass';
+      lp2.frequency.value=lp.frequency.value; lp2.Q.value=0.7;
+      lp.connect(lp2); der=lp2;
+    }
+    der.connect(sh); sh.connect(gn);
+    return {entree:hp,sortie:gn};
   }
 
   const bg=buildGraph, sn=scheduleNote;
@@ -3090,6 +3099,305 @@ sizeCanvas();
   E('m3raz').addEventListener('click',()=>{ ST.lo=null; ST.hi=null; ecrire(); afficher(); relancer(); });
   afficher();
   console.info('GGX ML3 : Low-End Seed actif (banque de réglages, zéro échantillon)');
+})();
+</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   COUCHE ML4 — ALL-IN-ONE (ML4v1 · GGX v43) · additive
+     1. Un bouton : le mix PUIS chaque piste non vide, d'affilée
+     2. Bloc de durée fixe (30,0 → 75,0 s par défaut) : les bornes sont
+        passées à ggxML1.fichier(parts,a,b,…), bornes() n'est pas touché
+     3. Fiche de catalogue produite ici : un .md lisible + un .json,
+        avec sha256 tronqué de chaque fichier exporté
+     4. 700 ms entre deux téléchargements (Chrome bloque les rafales)
+   Classement dans le dépôt : 🟩 ggx-seed (la page ne peut pas écrire
+   dans le dépôt — zéro-backend, le push part du téléphone)
+   ═══════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  const M=window.ggxML1;
+  if(!M||typeof M.fichier!=='function'||typeof M.dl!=='function'||typeof S!=='object'||typeof $!=='function'){
+    console.warn('GGX ML4 : ML1 ou socle absent — couche inactive'); return;
+  }
+  const CLE='ggx.ml4.aio';
+  const DEF={debut:30,duree:45,json:true,md:true};
+  function lire(){ try{ const t=localStorage.getItem(CLE); return t?JSON.parse(t):{}; }catch(e){ return {}; } }
+  function ecrire(){ try{ localStorage.setItem(CLE,JSON.stringify(ST)); }catch(e){} }
+  const ST=Object.assign({},DEF,lire());
+
+  const slug=s=>String(s||'sans-nom').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^A-Za-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,48)||'sans-nom';
+  const sansExt=s=>String(s||'').replace(/.[^.]+$/,'');
+  const num=(n)=>n.toFixed(1).replace('.','-');
+  const ko=b=>Math.round(b.size/1024);
+  async function sha16(blob){
+    try{
+      const h=await crypto.subtle.digest('SHA-256',await blob.arrayBuffer());
+      return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('').slice(0,16);
+    }catch(e){ return null; }
+  }
+  function seedML3(){ try{ const t=localStorage.getItem('ggx.ml3.seed'); return t?JSON.parse(t):null; }catch(e){ return null; } }
+
+  let occupe=false;
+  const boutons=()=>[...document.querySelectorAll('#exportBtn,#ggxAll,#ggxAIO,[data-ggxmp3]')];
+
+  async function unExport(parts,etiquette,a,b,fmt,niveau){
+    const f=await M.fichier(parts,a,b,fmt,niveau,p=>M.dire('« '+etiquette+' » : '+Math.round(p*100)+' %'));
+    const nom=slug(sansExt(S.fileName))+'_'+slug(etiquette)+'_'+num(a)+'-'+num(b)+'.'+f.ext;
+    M.dl(f.blob,nom);
+    return {etiquette:etiquette, fichier:nom, ko:ko(f.blob), sha256_16:await sha16(f.blob)};
+  }
+
+  function fiche(meta){
+    const L=[];
+    L.push('# Seed · '+meta.source.fichier);
+    L.push('');
+    L.push('- **date** : '+meta.date);
+    L.push('- **bloc** : '+meta.bloc.debut_s.toFixed(2)+' s → '+meta.bloc.fin_s.toFixed(2)+' s ('+meta.bloc.duree_s.toFixed(2)+' s)');
+    L.push('- **source** : `'+meta.source.fichier+'` — '+meta.source.duree_s.toFixed(2)+' s, '+meta.source.pistes+' piste(s), '+meta.source.bpm+' bpm');
+    L.push('- **rendu** : '+meta.rendu.format.toUpperCase()+', niveau '+meta.rendu.niveau);
+    if(meta.low_end_seed){
+      const s=meta.low_end_seed;
+      L.push('- **Low-End Seed** : '+(s.on?('actif — timbre `'+s.seed+'`, ciblage `'+s.mode+'`'+(s.pistes?' ('+s.pistes+')':'')+(s.lo!=null||s.hi!=null?', registre '+s.lo+'–'+s.hi:'')):'inactif'));
+    } else { L.push('- **Low-End Seed** : aucun réglage enregistré'); }
+    L.push('');
+    L.push('## Pistes de la source');
+    L.push('');
+    L.push('| # | nom | prog | batterie | notes |');
+    L.push('|---|-----|------|----------|-------|');
+    meta.pistes.forEach(p=>L.push('| '+p.n+' | '+p.nom+' | '+(p.prog==null?'—':p.prog)+' | '+(p.batterie?'oui':'non')+' | '+p.notes+' |'));
+    L.push('');
+    L.push('## Fichiers exportés');
+    L.push('');
+    L.push('| étiquette | fichier | ko | sha256 (16) |');
+    L.push('|-----------|---------|----|-------------|');
+    meta.fichiers.forEach(f=>L.push('| '+f.etiquette+' | `'+f.fichier+'` | '+f.ko+' | `'+(f.sha256_16||'—')+'` |'));
+    L.push('');
+    L.push('_Rendu par '+meta.outil+'. Classer avec : `ggx-seed`._');
+    L.push('');
+    return L.join('\n');
+  }
+
+  async function allInOne(){
+    if(occupe){ M.dire('Un export est déjà en cours…'); return; }
+    if(!S.parts||!S.parts.length){ M.dire('Charge un fichier MIDI d’abord.','bad'); return; }
+    const a=Math.max(0,+ST.debut||0), b=a+Math.max(1,+ST.duree||45);
+    if(S.duration && a>=S.duration){ M.dire('Le début ('+a.toFixed(1)+' s) dépasse la durée du morceau ('+S.duration.toFixed(1)+' s).','bad'); return; }
+    const bb=(S.duration?Math.min(b,S.duration):b);
+    if(bb-a<0.2){ M.dire('Bloc trop court après recadrage.','bad'); return; }
+    const liste=S.parts.filter(p=>p.notes&&p.notes.length);
+    if(!liste.length){ M.dire('Aucune piste ne contient de notes.','bad'); return; }
+    const fmt=($('fmt')&&$('fmt').value)||'wav';
+    const niveau=parseFloat($('gain')&&$('gain').value)||0.9;
+    occupe=true; boutons().forEach(x=>x.disabled=true);
+    const t0=(window.performance&&performance.now)?performance.now():Date.now();
+    const fichiers=[];
+    try{
+      M.dire('All-In-One : '+(bb-a).toFixed(1)+' s, '+(1+liste.length)+' fichiers ('+fmt+')…');
+      fichiers.push(await unExport(S.parts,'mix-'+liste.length+'-pistes',a,bb,fmt,niveau));
+      for(let k=0;k<liste.length;k++){
+        await new Promise(r=>setTimeout(r,700));
+        M.dire('Piste '+(k+1)+'/'+liste.length+'…');
+        fichiers.push(await unExport([M.seule(liste[k])],liste[k].label,a,bb,fmt,niveau));
+      }
+      const meta={
+        outil:'GGX ML4 All-In-One (ML4v1 · GGX v43)',
+        date:new Date().toISOString(),
+        source:{fichier:S.fileName||'sans-nom',duree_s:+(S.duration||0),bpm:S.bpm||null,pistes:S.parts.length},
+        bloc:{debut_s:a,fin_s:bb,duree_s:bb-a,duree_demandee_s:+ST.duree||45},
+        rendu:{format:fmt,niveau:niveau},
+        low_end_seed:seedML3(),
+        pistes:S.parts.map((p,k)=>({n:k+1,nom:p.label||('piste '+(k+1)),prog:(p.progOverride==null?(p.prog==null?null:p.prog):p.progOverride),batterie:!!p.drum,notes:(p.notes?p.notes.length:0)})),
+        fichiers:fichiers
+      };
+      const base=slug(sansExt(S.fileName))+'_seed_'+num(a)+'-'+num(bb);
+      if(ST.json){ await new Promise(r=>setTimeout(r,500));
+        M.dl(new Blob([JSON.stringify(meta,null,2)],{type:'application/json'}),base+'.json'); }
+      if(ST.md){ await new Promise(r=>setTimeout(r,500));
+        M.dl(new Blob([fiche(meta)],{type:'text/markdown'}),base+'.md'); }
+      const s=((((window.performance&&performance.now)?performance.now():Date.now())-t0)/1000).toFixed(1);
+      M.dire('All-In-One terminé : '+fichiers.length+' audio + fiche ('+s+' s). Classe-la avec « ggx-seed » dans Termux.','ok');
+    }catch(err){
+      M.dire('All-In-One interrompu : '+(err&&err.message?err.message:err),'bad');
+    }finally{
+      occupe=false; boutons().forEach(x=>x.disabled=false);
+    }
+  }
+
+  /* ── bouton et réglages, à côté de l'export ── */
+  const hote=$('exportBtn')&&$('exportBtn').parentElement&&$('exportBtn').parentElement.parentElement;
+  if(!hote){ window.ggxML4={allInOne:allInOne}; console.info('GGX ML4 : moteur posé, hôte d’écran absent'); return; }
+  const fld=document.createElement('div'); fld.className='fld';
+  fld.innerHTML='<label>All-In-One</label>';
+  const box=document.createElement('div');
+  box.style.cssText='display:flex;flex-wrap:wrap;gap:.4rem;align-items:center';
+  box.innerHTML='<button id="ggxAIO" style="flex:1 1 100%">🅐 All-In-One — bloc fixe</button>'
+    +'<label>début <input id="m4deb" type="number" min="0" step="0.5" style="width:4.6rem"></label>'
+    +'<label>durée <input id="m4dur" type="number" min="1" step="1" style="width:4.6rem"></label>'
+    +'<span id="m4bloc" style="opacity:.75"></span>'
+    +'<label><input type="checkbox" id="m4json"> .json</label>'
+    +'<label><input type="checkbox" id="m4md"> .md</label>';
+  fld.appendChild(box); hote.appendChild(fld);
+
+  const E=id=>box.querySelector('#'+id);
+  function afficher(){
+    const a=+ST.debut||0, d=+ST.duree||45;
+    E('m4deb').value=a; E('m4dur').value=d;
+    E('m4json').checked=!!ST.json; E('m4md').checked=!!ST.md;
+    E('m4bloc').textContent=a.toFixed(1)+' → '+(a+d).toFixed(1)+' s';
+    E('ggxAIO').textContent='🅐 All-In-One — bloc fixe '+d+' s';
+  }
+  E('m4deb').addEventListener('change',e=>{ ST.debut=parseFloat(e.target.value)||0; ecrire(); afficher(); });
+  E('m4dur').addEventListener('change',e=>{ ST.duree=parseFloat(e.target.value)||45; ecrire(); afficher(); });
+  E('m4json').addEventListener('change',e=>{ ST.json=e.target.checked; ecrire(); });
+  E('m4md').addEventListener('change',e=>{ ST.md=e.target.checked; ecrire(); });
+  E('ggxAIO').addEventListener('click',allInOne);
+  afficher();
+  window.ggxML4={allInOne:allInOne,reglages:()=>ST};
+  console.info('GGX ML4 : All-In-One actif (bloc fixe + fiche .md/.json)');
+})();
+</script>
+<script>
+/* ═════════════════════════════════════════════════════════════════
+   COUCHE ML5 — BANQUE DANS LA PAGE (ML5v1 · GGX v110) · additive
+     1. « 🎸 Ma banque » sur l'écran d'accueil : tes tabs, MIDI et sons
+        gardés DANS la page (IndexedDB de ce navigateur), d'une session
+        à l'autre — zéro serveur, marche depuis midi-lyrics.vercel.app
+     2. « ＋ Ajouter » : plusieurs fichiers d'un coup ; un même contenu
+        n'est gardé qu'une fois (empreinte sha256)
+     3. Un toucher sur un nom → il s'ouvre (openBuffer du socle) ;
+        recherche par nom ; 🗑 retire UN fichier, rien d'autre
+     4. Tab (.gp…) ou MIDI ouvert par le bouton ou le glisser-déposer
+        habituel : rangé tout seul dans la banque (l'audio, plus lourd,
+        seulement par « ＋ Ajouter »)
+   Remplace l'usage de ?banque= (127.0.0.1:8765, bloqué depuis https —
+   consigne 32) sans toucher au socle : ?banque= reste tel quel.
+   ═════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if(typeof openBuffer!=='function'||typeof $!=='function'||!$('loadCard')||!window.indexedDB){
+    console.warn('GGX ML5 : socle ou IndexedDB absent — couche inactive'); return;
+  }
+  const BASE='ggx-banque', MAG='fichiers', AUTO=/\.(gp|gpx|gp3|gp4|gp5|gtp|mid|midi|kar)$/i;
+  const ACCEPT='.gp,.gpx,.gp5,.gp4,.gp3,.gtp,.mid,.midi,.kar,.mp3,.wav,.m4a,.ogg,.opus,.aac,.flac,audio/*';
+  let dbp=null;
+  function db(){
+    if(dbp) return dbp;
+    dbp=new Promise((ok,ko)=>{
+      const r=indexedDB.open(BASE,1);
+      r.onupgradeneeded=()=>{ const s=r.result.createObjectStore(MAG,{keyPath:'id'}); s.createIndex('dernier','dernier'); };
+      r.onsuccess=()=>ok(r.result); r.onerror=()=>ko(r.error);
+    });
+    return dbp;
+  }
+  function tx(mode,fn){
+    return db().then(d=>new Promise((ok,ko)=>{
+      const t=d.transaction(MAG,mode), s=t.objectStore(MAG); let res;
+      Promise.resolve(fn(s)).then(v=>{ res=v; });
+      t.oncomplete=()=>ok(res); t.onerror=()=>ko(t.error); t.onabort=()=>ko(t.error);
+    }));
+  }
+  const req=r=>new Promise((ok,ko)=>{ r.onsuccess=()=>ok(r.result); r.onerror=()=>ko(r.error); });
+  async function empreinte(buf,f){
+    try{
+      const h=await crypto.subtle.digest('SHA-256',buf);
+      return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('').slice(0,16);
+    }catch(e){ return 'n'+f.size+'-'+(f.lastModified||0)+'-'+f.name; }
+  }
+  const genre=n=>/\.(gp|gpx|gp3|gp4|gp5|gtp)$/i.test(n)?'TAB':/\.(mid|midi|kar)$/i.test(n)?'MIDI':'SON';
+  const taille=o=>o>=1048576?(o/1048576).toFixed(1)+' Mo':Math.max(1,Math.round(o/1024))+' ko';
+  const jour=t=>new Date(t).toLocaleDateString('fr-CA');
+  let demandePersist=false;
+
+  async function ajouter(f,muet){
+    const buf=await f.arrayBuffer();
+    const id=await empreinte(buf,f);
+    const deja=await tx('readonly',s=>req(s.get(id)));
+    if(deja){ if(!muet) dire('déjà dans la banque : '+deja.nom); return 'deja'; }
+    const t=Date.now();
+    await tx('readwrite',s=>req(s.put({id,nom:f.name,taille:f.size,genre:genre(f.name),ajoute:t,dernier:t,data:buf})));
+    if(!demandePersist&&navigator.storage&&navigator.storage.persist){ demandePersist=true; navigator.storage.persist().catch(()=>{}); }
+    return 'neuf';
+  }
+  async function ajouterTous(fichiers){
+    let n=0,d=0,e=0;
+    for(const f of fichiers){
+      try{ (await ajouter(f,true))==='neuf'?n++:d++; }
+      catch(x){ e++; console.warn('GGX ML5 : ajout refusé',f.name,x); }
+    }
+    dire(n+' ajouté(s)'+(d?' · '+d+' déjà là':'')+(e?' · '+e+' refusé(s) (place du navigateur ?)':''));
+    await afficher();
+  }
+  async function liste(){
+    return tx('readonly',s=>new Promise((ok,ko)=>{
+      const out=[]; const c=s.index('dernier').openCursor(null,'prev');
+      c.onsuccess=()=>{ const k=c.result; if(!k) return ok(out); const v=k.value; out.push({id:v.id,nom:v.nom,taille:v.taille,genre:v.genre,dernier:v.dernier}); k.continue(); };
+      c.onerror=()=>ko(c.error);
+    }));
+  }
+  async function ouvrir(id){
+    const v=await tx('readonly',s=>req(s.get(id)));
+    if(!v){ dire('introuvable — liste rafraîchie'); return afficher(); }
+    v.dernier=Date.now(); await tx('readwrite',s=>req(s.put(v)));
+    try{ if(typeof clearErr==='function') clearErr(); }catch(e){}
+    return openBuffer(v.data.slice(0),v.nom);
+  }
+  async function retirer(id,nom){
+    if(!confirm('Retirer « '+nom+' » de la banque ? (ton fichier d\'origine n\'est pas touché)')) return;
+    await tx('readwrite',s=>req(s.delete(id))); dire('retiré : '+nom); await afficher();
+  }
+
+  /* ── écran : sous la zone de dépôt ── */
+  const P=document.createElement('div'); P.id='ggxML5';
+  P.style.cssText='margin-top:14px;border-top:1px solid var(--edge,#242c3a);padding-top:12px';
+  P.innerHTML='<div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center">'
+    +'<strong style="flex:1 1 auto">🎸 Ma banque <span id="m5n" class="mono" style="opacity:.7;font-weight:400"></span></strong>'
+    +'<button id="m5add" type="button" class="btn-sm">＋ Ajouter</button>'
+    +'<input id="m5file" type="file" multiple accept="'+ACCEPT+'" class="hide" style="display:none"></div>'
+    +'<input id="m5q" type="search" placeholder="chercher un nom…" style="width:100%;margin:.5rem 0;box-sizing:border-box">'
+    +'<div id="m5msg" class="mono" style="font-size:12px;opacity:.8;min-height:1em"></div>'
+    +'<div id="m5list" style="display:flex;flex-direction:column;gap:4px;max-height:50vh;overflow:auto"></div>';
+  const hote=$('dropStatus')||$('drop');
+  hote.parentNode.insertBefore(P,hote.nextSibling);
+  const E=id=>P.querySelector('#'+id);
+  function dire(t){ E('m5msg').textContent=t||''; }
+
+  let TOUT=[];
+  async function afficher(){
+    try{ TOUT=await liste(); }catch(e){ dire('banque illisible : '+(e&&e.message||e)); return; }
+    const q=E('m5q').value.trim().toLowerCase();
+    const L=q?TOUT.filter(x=>x.nom.toLowerCase().includes(q)):TOUT;
+    const tot=TOUT.reduce((a,x)=>a+(x.taille||0),0);
+    E('m5n').textContent=TOUT.length?'· '+TOUT.length+' · '+taille(tot):'';
+    const box=E('m5list'); box.textContent='';
+    if(!TOUT.length){ box.innerHTML='<div class="note" style="opacity:.75">Vide : « ＋ Ajouter » tes tabs, MIDI ou sons. Les tabs et MIDI que tu ouvres s\'y rangent tout seuls.</div>'; return; }
+    if(!L.length){ box.innerHTML='<div class="note" style="opacity:.75">Aucun nom ne contient « '+q.replace(/[<&]/g,'')+' ».</div>'; return; }
+    for(const x of L){
+      const r=document.createElement('div');
+      r.style.cssText='display:flex;gap:.4rem;align-items:center';
+      const b=document.createElement('button'); b.type='button'; b.className='btn-sm ghost';
+      b.style.cssText='flex:1 1 auto;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      b.textContent=x.nom; b.title=x.nom; b.onclick=()=>ouvrir(x.id).catch(e=>dire('ouverture impossible : '+(e&&e.message||e)));
+      const m=document.createElement('span'); m.className='mono'; m.style.cssText='font-size:11px;opacity:.7;white-space:nowrap';
+      m.textContent=x.genre+' · '+taille(x.taille)+' · '+jour(x.dernier);
+      const d=document.createElement('button'); d.type='button'; d.className='btn-sm ghost'; d.textContent='🗑'; d.title='retirer de la banque';
+      d.onclick=()=>retirer(x.id,x.nom).catch(e=>dire('retrait impossible : '+(e&&e.message||e)));
+      r.append(b,m,d); box.appendChild(r);
+    }
+  }
+  E('m5add').addEventListener('click',()=>E('m5file').click());
+  E('m5file').addEventListener('change',e=>{ const f=[...e.target.files]; e.target.value=''; if(f.length) ajouterTous(f); });
+  E('m5q').addEventListener('input',afficher);
+
+  /* ── rangement automatique des tabs et MIDI ouverts (le socle les ouvre comme avant) ── */
+  function auto(f){ if(f&&AUTO.test(f.name)) ajouter(f,true).then(r=>{ if(r==='neuf') afficher(); }).catch(()=>{}); }
+  const fi=$('file'); if(fi) fi.addEventListener('change',e=>auto(e.target.files&&e.target.files[0]));
+  document.addEventListener('drop',e=>auto(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0]));
+  const aut=$('another'); if(aut) aut.addEventListener('click',()=>setTimeout(afficher,0));
+
+  afficher();
+  window.ggxML5={ajouter:f=>ajouter(f).then(r=>(afficher(),r)),liste,ouvrir,retirer:id=>tx('readwrite',s=>req(s.delete(id))).then(afficher)};
+  console.info('GGX ML5 : banque dans la page active (IndexedDB « ggx-banque »)');
 })();
 </script>
 <!-- GGX-ML1 fin -->

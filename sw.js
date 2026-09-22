@@ -1,4 +1,4 @@
-const CACHE = "midi-2026-09-17-ml3-3097l";
+const CACHE = "midi-2026-09-22-ml3-3405l";
 const ASSETS = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (e) => {
