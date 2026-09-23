@@ -2551,7 +2551,7 @@ sizeCanvas();
 <!-- GGX-ML1 début -->
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   COUCHE ML1 — EXPORT PAR PISTE (ML1v7 · GGX v110) · additive, aucune ligne du socle modifiée
+   COUCHE ML1 — EXPORT PAR PISTE (ML1v8 · GGX v122) · additive, aucune ligne du socle modifiée
      1. Bouton « ⬇ MP3 » sur chaque piste : exporte CETTE piste seule
         (Guitare, Basse…), quel que soit l'état S / M, sur la sélection Début→Fin
      2. Bouton « Chaque piste → un fichier » : une piste = un fichier
@@ -3398,6 +3398,126 @@ sizeCanvas();
   afficher();
   window.ggxML5={ajouter:f=>ajouter(f).then(r=>(afficher(),r)),liste,ouvrir,retirer:id=>tx('readwrite',s=>req(s.delete(id))).then(afficher)};
   console.info('GGX ML5 : banque dans la page active (IndexedDB « ggx-banque »)');
+})();
+</script>
+<script>
+/* ═════════════════════════════════════════════════════════════════
+   COUCHE ML6 — MONTAGE BOUT À BOUT (ML6v1 · GGX v122) · additive
+     Comme CapCut, sans superposition ni enregistrement :
+     1. « ＋ La sélection » : la sélection A-B (pistes actives, niveau choisi)
+        est rendue en audio et ajoutée à la fin du montage
+     2. « ＋ Un son » : un MP3/WAV/M4A du téléphone (ou de Drive) s'ajoute aussi
+     3. ↑ ↓ pour l'ordre, ▶ pour écouter un morceau, 🗑 pour le retirer
+     4. ▶ Écouter le montage · ⬇ MP3 / WAV : tout d'un seul fichier, bout à bout,
+        raccords de 10 ms pour éviter les clics
+   Gardé dans la page (IndexedDB « ggx-montage ») d'une session à l'autre.
+   Utilise renderSelection / encodeMp3 / encodeWav / download du socle, sans les modifier.
+   ═════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if(typeof renderSelection!=='function'||typeof encodeWav!=='function'||typeof $!=='function'||!$('exportBtn')||!window.indexedDB){
+    console.warn('GGX ML6 : socle absent — couche inactive'); return;
+  }
+  const SR=44100, XF=Math.round(0.010*SR), BASE='ggx-montage', MAG='morceaux';
+  let dbp=null, CLIPS=[], lecteur=null;
+  function db(){ if(dbp) return dbp; dbp=new Promise((ok,ko)=>{ const r=indexedDB.open(BASE,1);
+    r.onupgradeneeded=()=>r.result.createObjectStore(MAG,{keyPath:'id'}); r.onsuccess=()=>ok(r.result); r.onerror=()=>ko(r.error); }); return dbp; }
+  function tx(mode,fn){ return db().then(d=>new Promise((ok,ko)=>{ const t=d.transaction(MAG,mode), s=t.objectStore(MAG); let v;
+    const r=fn(s); if(r) r.onsuccess=()=>{ v=r.result; }; t.oncomplete=()=>ok(v); t.onerror=()=>ko(t.error); })); }
+  const dur=c=>c.L.length/SR, mmss=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')+'.'+Math.floor((s%1)*10);
+  const nom=s=>(typeof slug==='function'?slug(s):String(s).replace(/[^\w.-]+/g,'_'));
+
+  async function sauver(){ await tx('readwrite',s=>s.clear()); for(let i=0;i<CLIPS.length;i++){ const c=CLIPS[i];
+    await tx('readwrite',s=>s.put({id:String(i).padStart(4,'0'),nom:c.nom,L:c.L.buffer,R:c.R.buffer})); } }
+  async function charger(){ try{ const d=await db(); await new Promise((ok,ko)=>{ const out=[]; const c=d.transaction(MAG).objectStore(MAG).openCursor();
+    c.onsuccess=()=>{ const k=c.result; if(!k){ CLIPS=out; return ok(); } const v=k.value; out.push({nom:v.nom,L:new Float32Array(v.L),R:new Float32Array(v.R)}); k.continue(); };
+    c.onerror=()=>ko(c.error); }); }catch(e){ console.warn('GGX ML6 : montage illisible',e); } }
+
+  function versClip(buf,n,garder){   // AudioBuffer → {L,R} à 44,1 kHz, longueur n échantillons
+    const L=new Float32Array(n), R=new Float32Array(n), a=buf.getChannelData(0), b=buf.numberOfChannels>1?buf.getChannelData(1):a;
+    L.set(a.subarray(0,Math.min(n,a.length))); R.set(b.subarray(0,Math.min(n,b.length))); return {nom:garder,L,R}; }
+  async function ajouterSelection(){
+    const a=Math.max(0,parseFloat($('inA').value)||0), b=Math.min(S.duration,parseFloat($('inB').value)||S.duration);
+    if(b-a<0.2){ dire('Sélection trop courte : place une fin après le début.'); return; }
+    const anySolo=S.parts.some(p=>p.solo), live=S.parts.filter(p=>anySolo?p.solo:!p.mute);
+    if(!live.length){ dire('Toutes les pistes sont coupées : rien à ajouter.'); return; }
+    dire('Rendu de '+(b-a).toFixed(1)+' s…');
+    const buf=await renderSelection(a,b,parseFloat(($('gain')||{}).value||0.9));
+    CLIPS.push(versClip(buf,Math.round((b-a)*SR),(S.fileName||'tab').replace(/\.[^.]+$/,'')+' · '+a.toFixed(1)+'-'+b.toFixed(1)+' s'));
+    await sauver(); afficher(); dire('Ajouté à la fin du montage.');
+  }
+  async function ajouterSon(f){
+    try{ dire('Lecture de '+f.name+'…');
+      const tmp=new (window.OfflineAudioContext||window.webkitOfflineAudioContext)(2,SR,SR);
+      const buf=await tmp.decodeAudioData(await f.arrayBuffer());
+      let src=buf; if(buf.sampleRate!==SR){ const oc=new (window.OfflineAudioContext||window.webkitOfflineAudioContext)(2,Math.ceil(buf.duration*SR),SR);
+        const s=oc.createBufferSource(); s.buffer=buf; s.connect(oc.destination); s.start(); src=await oc.startRendering(); }
+      CLIPS.push(versClip(src,src.length,f.name.replace(/\.[^.]+$/,''))); await sauver(); afficher(); dire('Son ajouté à la fin du montage.');
+    }catch(e){ dire('Ce son ne se lit pas ('+(e&&e.message||e)+').'); }
+  }
+  function assembler(){   // bout à bout, raccord de 10 ms (fondu enchaîné court)
+    let total=0; CLIPS.forEach((c,i)=>{ total+=c.L.length-(i?Math.min(XF,c.L.length):0); });
+    const L=new Float32Array(Math.max(1,total)), R=new Float32Array(Math.max(1,total)); let pos=0;
+    CLIPS.forEach((c,i)=>{ const x=i?Math.min(XF,c.L.length,pos):0; const deb=pos-x;
+      for(let j=0;j<c.L.length;j++){ const k=deb+j; let g=1, h=1;
+        if(j<x){ g=j/x; h=1-g; L[k]=L[k]*h+c.L[j]*g; R[k]=R[k]*h+c.R[j]*g; } else { L[k]=c.L[j]; R[k]=c.R[j]; } }
+      pos=deb+c.L.length; });
+    const ctx=new (window.OfflineAudioContext||window.webkitOfflineAudioContext)(2,L.length,SR), buf=ctx.createBuffer(2,L.length,SR);
+    buf.copyToChannel(L,0); buf.copyToChannel(R,1); return buf;
+  }
+  function arreter(){ if(lecteur){ try{ lecteur.stop(); }catch(e){} lecteur=null; } E('m6stop').disabled=true; }
+  function jouer(buf){ arreter(); const ctx=(S.ctx&&S.ctx.state!=='closed')?S.ctx:new (window.AudioContext||window.webkitAudioContext)();
+    if(ctx.state==='suspended') ctx.resume(); const s=ctx.createBufferSource(); s.buffer=buf; s.connect(ctx.destination); s.start();
+    s.onended=()=>{ if(lecteur===s) arreter(); }; lecteur=s; E('m6stop').disabled=false; }
+  async function exporter(fmt){
+    if(!CLIPS.length){ dire('Le montage est vide.'); return; }
+    const buf=assembler(), base=nom(CLIPS.length+'-morceaux_'+(S.fileName||'montage').replace(/\.[^.]+$/,''))+'_montage';
+    if(fmt==='wav'){ download(encodeWav(buf),base+'.wav'); dire('WAV exporté : '+base+'.wav ('+mmss(buf.duration)+')'); return; }
+    dire('Encodage MP3…'); const mp3=await encodeMp3(buf,192,p=>dire('Encodage MP3… '+Math.round(p*100)+' %'));
+    download(mp3,base+'.mp3'); dire('MP3 exporté : '+base+'.mp3 ('+mmss(buf.duration)+')');
+  }
+
+  /* ── écran ── */
+  const hote=$('exportBtn').closest('.card')||$('expStatus').parentNode;
+  const P=document.createElement('section'); P.id='ggxML6'; P.className=hote.className||'card';
+  P.innerHTML='<h2 style="margin-top:0">🎞 Montage bout à bout <span id="m6n" class="mono" style="font-weight:400;opacity:.7"></span></h2>'
+   +'<p class="note" style="margin-top:0">Comme CapCut : chaque morceau s\'ajoute <b>à la suite</b> du précédent, sans superposition.</p>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:.5rem">'
+   +'<button id="m6sel" type="button" class="primary">＋ La sélection</button>'
+   +'<button id="m6son" type="button">＋ Un son</button><input id="m6file" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" style="display:none">'
+   +'<button id="m6play" type="button">▶ Écouter le montage</button><button id="m6stop" type="button" disabled>■</button>'
+   +'<button id="m6mp3" type="button">⬇ MP3</button><button id="m6wav" type="button">⬇ WAV</button>'
+   +'<button id="m6vider" type="button">Vider</button></div>'
+   +'<div id="m6list" style="display:flex;flex-direction:column;gap:4px;margin-top:.6rem"></div>'
+   +'<div class="status" id="m6msg"></div>';
+  hote.parentNode.insertBefore(P,hote.nextSibling);
+  const E=id=>P.querySelector('#'+id); function dire(t){ E('m6msg').textContent=t||''; }
+  function afficher(){
+    const tot=CLIPS.reduce((a,c,i)=>a+dur(c)-(i?XF/SR:0),0);
+    E('m6n').textContent=CLIPS.length?'· '+CLIPS.length+' · '+mmss(tot):'';
+    const box=E('m6list'); box.textContent='';
+    if(!CLIPS.length){ box.innerHTML='<div class="note" style="opacity:.75">Vide : place une sélection (Début ici / Fin ici, ou Extrait 16 s) puis « ＋ La sélection ».</div>'; return; }
+    CLIPS.forEach((c,i)=>{ const r=document.createElement('div'); r.style.cssText='display:flex;gap:.35rem;align-items:center';
+      const t=document.createElement('span'); t.className='mono'; t.style.cssText='flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px';
+      t.textContent=(i+1)+'. '+c.nom+' · '+mmss(dur(c)); r.appendChild(t);
+      [['▶',()=>{ const b=new (window.OfflineAudioContext||window.webkitOfflineAudioContext)(2,c.L.length,SR).createBuffer(2,c.L.length,SR); b.copyToChannel(c.L,0); b.copyToChannel(c.R,1); jouer(b); }],
+       ['↑',async()=>{ if(i>0){ [CLIPS[i-1],CLIPS[i]]=[CLIPS[i],CLIPS[i-1]]; await sauver(); afficher(); } }],
+       ['↓',async()=>{ if(i<CLIPS.length-1){ [CLIPS[i+1],CLIPS[i]]=[CLIPS[i],CLIPS[i+1]]; await sauver(); afficher(); } }],
+       ['🗑',async()=>{ CLIPS.splice(i,1); await sauver(); afficher(); }]].forEach(([l,f])=>{ const b=document.createElement('button'); b.type='button'; b.textContent=l;
+         b.className='btn-sm ghost'; b.onclick=()=>Promise.resolve(f()).catch(e=>dire(String(e&&e.message||e))); r.appendChild(b); });
+      box.appendChild(r); });
+  }
+  const garde=f=>()=>Promise.resolve(f()).catch(e=>dire('Erreur : '+(e&&e.message||e)));
+  E('m6sel').onclick=garde(ajouterSelection);
+  E('m6son').onclick=()=>E('m6file').click();
+  E('m6file').onchange=e=>{ const f=[...e.target.files]; e.target.value=''; (async()=>{ for(const x of f) await ajouterSon(x); })(); };
+  E('m6play').onclick=garde(()=>{ if(!CLIPS.length){ dire('Le montage est vide.'); return; } jouer(assembler()); });
+  E('m6stop').onclick=arreter;
+  E('m6mp3').onclick=garde(()=>exporter('mp3')); E('m6wav').onclick=garde(()=>exporter('wav'));
+  E('m6vider').onclick=garde(async()=>{ if(!CLIPS.length||!confirm('Vider le montage ? (tes fichiers d\'origine ne sont pas touchés)')) return; CLIPS=[]; await sauver(); afficher(); dire('Montage vidé.'); });
+  charger().then(afficher);
+  window.ggxML6={liste:()=>CLIPS.map((c,i)=>({i,nom:c.nom,duree:dur(c)})),assembler,ajouterSelection};
+  console.info('GGX ML6 : montage bout à bout actif (IndexedDB « ggx-montage »)');
 })();
 </script>
 <!-- GGX-ML1 fin -->
