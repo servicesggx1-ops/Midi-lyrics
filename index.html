@@ -3627,6 +3627,215 @@ sizeCanvas();
   console.info('GGX ML8 : lecture sans prison (la page ne suit plus de force, bouton pause flottant)');
 })();
 </script>
+<script>
+/* ═════════════════════════════════════════════════════════════════
+   COUCHE ML9 — TABLE MULTIPISTE (ML9v1 · GGX v286) · additive, zéro serveur
+     Comme CapCut : chaque son sur sa ligne, l'un par-dessus l'autre, tout le morceau visible.
+     · « ＋ Un son » : MP3/WAV/M4A/FLAC tel quel — AUCUNE transcription MIDI ; « ＋ La sélection »
+       (tab/MIDI ouvert) ; « ＋ Le montage » (le bout à bout ML6)
+     · glisser un son = le décaler (aimanté au temps si le tempo est connu) ; boutons fins ±10 ms / ±1 temps
+     · glisser sur la règle = choisir le moment à écouter ; toucher la règle = placer la tête
+     · par ligne : volume, coupé, solo, À MOI / PAS À MOI, retirer
+     · ⬇ MP3 / WAV du moment choisi (ou de tout), nommé PERSO_ / AMOI_ / ATRIER_ comme le montage
+   Gardé dans la page (IndexedDB « ggx-multipiste »). La page ne défile jamais toute seule.
+   ═════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if(typeof $!=='function'||typeof encodeWav!=='function'||typeof download!=='function'||!$('loadCard')||!window.indexedDB){
+    console.warn('GGX ML9 : socle absent — couche inactive'); return;
+  }
+  const SR=44100, LH=58, RH=24, BASE='ggx-multipiste', MAG='pistes';
+  const COUL=['#3ee6c4','#f2b84b','#7aa2ff','#ff7a90','#b48cff','#7ee07e','#ff9f5a','#5ad1ff'];
+  const OAC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+  let P=[], sel=-1, zoom=1, vue=0, A=0, B=0, tete=0, lecture=null, actx=null, geste=null;
+  const fmt=t=>{ t=Math.max(0,t); return Math.floor(t/60)+':'+String(Math.floor(t%60)).padStart(2,'0')+'.'+Math.floor((t%1)*10); };
+  const nomf=s=>(typeof slug==='function'?slug(s):String(s).replace(/[^\w.-]+/g,'_'));
+  const bpmDuNom=n=>{ const m=/(?:^|[^\d])(\d{2,3})\s*BPM/i.exec(n)||/^(\d{2,3})-\d{1,2}[AB]_/.exec(n); const b=m?+m[1]:0; return b>=50&&b<=220?b:null; };
+  const pnDuNom=n=>/^PERSO_/i.test(n)?'P':/^AMOI_/i.test(n)?'N':'?';
+  const PNL={P:'PAS À MOI',N:'À MOI','?':'À TRIER'};
+
+  /* ── mémoire de la page ── */
+  let dbp=null;
+  function db(){ if(dbp) return dbp; dbp=new Promise((ok,ko)=>{ const r=indexedDB.open(BASE,1);
+    r.onupgradeneeded=()=>r.result.createObjectStore(MAG,{keyPath:'id'}); r.onsuccess=()=>ok(r.result); r.onerror=()=>ko(r.error); }); return dbp; }
+  async function sauver(){ try{ const d=await db(); await new Promise((ok,ko)=>{ const t=d.transaction(MAG,'readwrite'), s=t.objectStore(MAG); s.clear();
+    P.forEach((p,i)=>s.put({id:String(i).padStart(3,'0'),nom:p.nom,L:p.L.buffer,R:p.R.buffer,off:p.off,gain:p.gain,mute:p.mute,solo:p.solo,pn:p.pn,bpm:p.bpm}));
+    t.oncomplete=ok; t.onerror=()=>ko(t.error); }); }catch(e){ dire('mémoire pleine ? ('+(e&&e.message||e)+')'); } }
+  async function charger(){ try{ const d=await db(); P=await new Promise((ok,ko)=>{ const out=[]; const c=d.transaction(MAG).objectStore(MAG).openCursor();
+    c.onsuccess=()=>{ const k=c.result; if(!k) return ok(out); const v=k.value;
+      out.push(prep({nom:v.nom,L:new Float32Array(v.L),R:new Float32Array(v.R),off:v.off||0,gain:v.gain==null?1:v.gain,mute:!!v.mute,solo:!!v.solo,pn:v.pn||'?',bpm:v.bpm||null})); k.continue(); };
+    c.onerror=()=>ko(c.error); }); }catch(e){ console.warn('GGX ML9 : table illisible',e); } }
+  function prep(p){ const n=p.L.length, K=1500, pk=new Float32Array(K), st=Math.max(1,Math.floor(n/K));
+    for(let k=0;k<K;k++){ let m=0; const a=k*st, b=Math.min(n,a+st); for(let i=a;i<b;i+=4){ const v=(Math.abs(p.L[i])+Math.abs(p.R[i]))/2; if(v>m) m=v; } pk[k]=m; }
+    p.pk=pk; p.dur=n/SR; return p; }
+  const totale=()=>Math.max(1,...P.map(p=>p.off+p.dur));
+  const estActive=p=>P.some(q=>q.solo)?p.solo:!p.mute;
+  const bpmRef=()=>{ const p=P.find(q=>q.bpm); return p?p.bpm:null; };
+
+  /* ── ajouter ── */
+  async function decoder(buf){ const b=await new OAC(2,SR,SR).decodeAudioData(buf); let src=b;
+    if(b.sampleRate!==SR){ const oc=new OAC(2,Math.ceil(b.duration*SR),SR), s=oc.createBufferSource(); s.buffer=b; s.connect(oc.destination); s.start(); src=await oc.startRendering(); }
+    return {L:src.getChannelData(0).slice(), R:(src.numberOfChannels>1?src.getChannelData(1):src.getChannelData(0)).slice()}; }
+  async function ajouter(p){ P.push(prep(Object.assign({off:0,gain:1,mute:false,solo:false,pn:'?',bpm:null},p))); sel=P.length-1;
+    await sauver(); ouvrir(true); cadrer(); dessiner(); panneau(); }
+  async function ajouterFichiers(fs){ for(const f of fs){ try{ dire('Lecture de '+f.name+'…'); const x=await decoder(await f.arrayBuffer());
+      await ajouter({nom:f.name.replace(/\.[^.]+$/,''),L:x.L,R:x.R,pn:pnDuNom(f.name),bpm:bpmDuNom(f.name)}); dire('Ajouté sur la ligne '+P.length+' (tel quel, sans transcription).'); }
+    catch(e){ dire(f.name+' ne se lit pas ('+(e&&e.message||e)+').'); } } }
+  async function ajouterSelection(){
+    if(typeof renderSelection!=='function'||typeof S==='undefined'||!S.duration||!S.parts||!S.parts.length){ dire('Ouvre d\'abord une tab ou un MIDI, puis choisis un moment.'); return; }
+    const a=Math.max(0,parseFloat(($('inA')||{}).value)||0), b=Math.min(S.duration,parseFloat(($('inB')||{}).value)||S.duration);
+    if(b-a<0.2){ dire('Sélection trop courte.'); return; }
+    dire('Rendu de '+(b-a).toFixed(1)+' s…'); const buf=await renderSelection(a,b,parseFloat(($('gain')||{}).value||0.9)), n=Math.round((b-a)*SR);
+    const L=new Float32Array(n), R=new Float32Array(n); L.set(buf.getChannelData(0).subarray(0,n)); R.set((buf.numberOfChannels>1?buf.getChannelData(1):buf.getChannelData(0)).subarray(0,n));
+    await ajouter({nom:(S.fileName||'tab')+' · '+a.toFixed(1)+'-'+b.toFixed(1)+' s',L,R,pn:window.ggxPN||'?',bpm:S.bpm||null}); dire('Sélection ajoutée sur la ligne '+P.length+'.'); }
+  async function ajouterMontage(){
+    if(!window.ggxML6||!window.ggxML6.liste().length){ dire('Le montage bout à bout est vide.'); return; }
+    const l=window.ggxML6.liste(), buf=window.ggxML6.assembler();
+    const pn=l.some(c=>c.pn==='P')?'P':l.every(c=>c.pn==='N')?'N':'?', bpm=(l.find(c=>c.bpm)||{}).bpm||null;
+    await ajouter({nom:'montage ('+l.length+' morceaux)',L:buf.getChannelData(0).slice(),R:buf.getChannelData(1).slice(),pn,bpm}); dire('Montage ajouté sur la ligne '+P.length+'.'); }
+
+  /* ── écran ── */
+  const SEC=document.createElement('section'); SEC.id='ggxML9'; SEC.className='panel';
+  SEC.innerHTML='<details id="m9d"><summary style="cursor:pointer;font-weight:600">🎚 Table multipiste <span id="m9n" class="mono" style="font-weight:400;opacity:.7"></span></summary>'
+   +'<p class="note" style="margin:.4rem 0">Comme CapCut : chaque son sur sa ligne, l\'un par-dessus l\'autre. <b>Glisse un son</b> pour le décaler · <b>glisse sur la règle</b> pour choisir le moment · <b>touche la règle</b> pour placer la tête. Les sons sont pris tels quels, sans transcription MIDI.</p>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem">'
+   +'<button id="m9son" type="button" class="primary">＋ Un son</button><input id="m9file" type="file" multiple accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac" style="display:none">'
+   +'<button id="m9sel" type="button">＋ La sélection</button><button id="m9mont" type="button">＋ Le montage</button></div>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.5rem">'
+   +'<button id="m9play" type="button" class="primary">▶ Lecture</button><button id="m9stop" type="button">■</button>'
+   +'<span id="m9t" class="mono" style="font-size:13px">0:00.0</span>'
+   +'<label style="font-size:13px"><input type="checkbox" id="m9boucle"> boucle</label><label style="font-size:13px"><input type="checkbox" id="m9aim" checked> aimanter au temps</label></div>'
+   +'<div style="display:flex;gap:.4rem;align-items:center;margin-top:.5rem"><button id="m9zm" type="button" class="btn-sm">−</button><button id="m9zp" type="button" class="btn-sm">＋</button>'
+   +'<input id="m9vue" type="range" min="0" max="0" step="0.01" value="0" style="flex:1 1 auto"></div>'
+   +'<canvas id="m9cv" style="width:100%;display:block;margin-top:.4rem;border-radius:10px;touch-action:pan-y;background:#0b0f16"></canvas>'
+   +'<div id="m9sel2" class="mono" style="font-size:12px;opacity:.85;margin-top:.3rem"></div>'
+   +'<div id="m9pan" style="margin-top:.4rem"></div>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem"><button id="m9mp3" type="button">⬇ MP3</button><button id="m9wav" type="button">⬇ WAV</button><button id="m9vider" type="button">Vider</button></div>'
+   +'<div class="status" id="m9msg"></div></details>';
+  const lc=$('loadCard'); lc.parentNode.insertBefore(SEC,lc.nextSibling);
+  const E=id=>SEC.querySelector('#'+id); function dire(t){ E('m9msg').textContent=t||''; }
+  const cv=E('m9cv'), c2=cv.getContext('2d');
+  function ouvrir(o){ E('m9d').open=!!o; }
+  E('m9d').addEventListener('toggle',()=>{ if(E('m9d').open) requestAnimationFrame(dessiner); });
+
+  const pps=()=>Math.max(1,cv.clientWidth)/(totale()*1.05/zoom);
+  const tx=t=>(t-vue)*pps(), ts=x=>x/pps()+vue;
+  function cadrer(){ const lv=totale()*1.05, larg=lv/zoom; vue=Math.max(0,Math.min(vue,lv-larg)); const r=E('m9vue'); r.max=Math.max(0,lv-larg); r.value=vue; }
+  function rond(x,y,w,h,r){ const c=c2; r=Math.min(r,w/2,h/2); c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+  function dessiner(){
+    if(!E('m9d').open) return;
+    const w=cv.clientWidth||300, h=RH+Math.max(1,P.length)*LH, dpr=window.devicePixelRatio||1;
+    if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){ cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr); cv.style.height=h+'px'; }
+    const c=c2; c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,w,h); c.fillStyle='#0b0f16'; c.fillRect(0,0,w,h);
+    const p_s=pps(), pas=[0.5,1,2,5,10,15,30,60,120].find(s=>s*p_s>=56)||120;
+    c.fillStyle='#5d687e'; c.font='11px ui-monospace,monospace';
+    for(let t=Math.floor(vue/pas)*pas; tx(t)<w; t+=pas){ const x=tx(t); if(x<0) continue; c.fillRect(x,RH-6,1,6); c.fillText(fmt(t).replace(/\.\d$/,''),x+3,12); }
+    const bpm=bpmRef();
+    if(bpm&&E('m9aim').checked){ const bt=60/bpm; if(bt*p_s>=5){ for(let t=Math.ceil(vue/bt)*bt; tx(t)<w; t+=bt){ const m=Math.round(t/bt)%4===0; c.fillStyle=m?'rgba(255,255,255,.10)':'rgba(255,255,255,.035)'; c.fillRect(tx(t),RH,1,h-RH); } } }
+    if(B>A){ c.fillStyle='rgba(122,162,255,.14)'; c.fillRect(tx(A),0,tx(B)-tx(A),h); c.fillStyle='#7aa2ff'; c.fillRect(tx(A),0,2,RH); c.fillRect(tx(B)-2,0,2,RH); }
+    if(!P.length){ c.fillStyle='#5d687e'; c.font='13px system-ui'; c.fillText('« ＋ Un son » pour commencer',12,RH+34); }
+    P.forEach((p,i)=>{ const y=RH+i*LH, x0=tx(p.off), x1=tx(p.off+p.dur), col=COUL[i%COUL.length];
+      if(i===sel){ c.fillStyle='rgba(255,255,255,.05)'; c.fillRect(0,y,w,LH); }
+      c.globalAlpha=estActive(p)?1:.3;
+      rond(x0,y+4,Math.max(2,x1-x0),LH-8,7); c.fillStyle=col+'2e'; c.fill(); c.strokeStyle=col; c.lineWidth=i===sel?2.5:1; c.stroke();
+      c.fillStyle=col; const mid=y+LH/2, hmax=(LH-16)/2, a=Math.max(0,Math.floor(x0)), b=Math.min(w,Math.ceil(x1));
+      for(let x=a;x<b;x+=2){ const k=Math.floor((x-x0)/Math.max(1,x1-x0)*p.pk.length), v=Math.min(1,(p.pk[k]||0)*p.gain)*hmax; c.fillRect(x,mid-v,1.4,Math.max(1,2*v)); }
+      c.globalAlpha=1; c.fillStyle='#e8edf5'; c.font='12px system-ui';
+      c.fillText((i+1)+'. '+p.nom.slice(0,38)+(p.mute?' · coupé':'')+(p.solo?' · solo':''),Math.max(4,Math.min(x0+6,w-120)),y+17);
+      c.fillStyle=p.pn==='P'?'#ff7a90':p.pn==='N'?'#3ee6c4':'#8b95a8'; c.font='10px system-ui'; c.fillText(PNL[p.pn]||PNL['?'],Math.max(4,Math.min(x0+6,w-120)),y+LH-9); });
+    const xh=tx(tete); c.fillStyle='#ff4d6d'; c.fillRect(xh-1,0,2,h);
+    E('m9n').textContent=P.length?'· '+P.length+' son(s) · '+fmt(totale()):'';
+    E('m9t').textContent=fmt(tete)+' / '+fmt(totale());
+  }
+  function afficherSel(){ E('m9sel2').textContent=B>A?'Moment choisi : '+fmt(A)+' → '+fmt(B)+' ('+(B-A).toFixed(2)+' s) · touche la règle hors du bleu pour l\'effacer':''; }
+  function aimanter(o){ const bpm=bpmRef(); if(!E('m9aim').checked||!bpm) return Math.round(o*100)/100; const g=60/bpm/4; return Math.round(o/g)*g; }
+
+  /* ── gestes sur la table ── */
+  const pos=e=>{ const r=cv.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; };
+  cv.addEventListener('pointerdown',e=>{ const {x,y}=pos(e);
+    if(y<RH){ geste={type:'regle',x0:x,t0:Math.max(0,ts(x))}; cv.setPointerCapture(e.pointerId); return; }
+    const i=Math.floor((y-RH)/LH); if(i<0||i>=P.length){ geste=null; return; }
+    sel=i; const p=P[i], t=ts(x);
+    if(t>=p.off&&t<=p.off+p.dur){ geste={type:'piste',i,x0:x,y0:y,off0:p.off,bouge:false}; cv.setPointerCapture(e.pointerId); } else geste=null;
+    panneau(); dessiner(); });
+  cv.addEventListener('pointermove',e=>{ if(!geste) return; const {x,y}=pos(e);
+    if(geste.type==='piste'){ if(!geste.bouge&&Math.abs(x-geste.x0)<6) return; geste.bouge=true; e.preventDefault();
+      P[geste.i].off=Math.max(0,aimanter(geste.off0+(x-geste.x0)/pps())); dessiner(); panneau(); }
+    else if(geste.type==='regle'&&Math.abs(x-geste.x0)>5){ const t=Math.max(0,ts(x)); A=Math.min(geste.t0,t); B=Math.max(geste.t0,t); dessiner(); afficherSel(); } });
+  function fin(e){ if(!geste) return; const {x}=pos(e);
+    if(geste.type==='piste'&&geste.bouge) sauver();
+    if(geste.type==='regle'&&Math.abs(x-geste.x0)<=5){ const t=Math.max(0,ts(x)); if(B>A&&(t<A||t>B)){ A=B=0; afficherSel(); } tete=t; if(lecture) jouer(); dessiner(); }
+    geste=null; }
+  cv.addEventListener('pointerup',fin); cv.addEventListener('pointercancel',()=>{ geste=null; });
+
+  /* ── panneau de la ligne choisie ── */
+  function panneau(){ const box=E('m9pan'); box.textContent=''; const p=P[sel]; if(!p) return;
+    const r=document.createElement('div'); r.style.cssText='display:flex;flex-wrap:wrap;gap:.35rem;align-items:center';
+    const t=document.createElement('span'); t.className='mono'; t.style.cssText='font-size:12px;flex:1 1 100%;opacity:.85';
+    t.textContent='Ligne '+(sel+1)+' · '+p.nom+' · départ '+fmt(p.off)+' ('+p.off.toFixed(3)+' s)'+(p.bpm?' · '+p.bpm+' BPM':''); r.appendChild(t);
+    const btn=(l,f,ti)=>{ const b=document.createElement('button'); b.type='button'; b.className='btn-sm'; b.textContent=l; if(ti) b.title=ti;
+      b.onclick=()=>Promise.resolve(f()).then(()=>{ sauver(); dessiner(); panneau(); }).catch(x=>dire(String(x&&x.message||x))); r.appendChild(b); return b; };
+    const bt=60/(bpmRef()||120);
+    btn('◀ temps',()=>{ p.off=Math.max(0,p.off-bt); },'reculer d\'un temps'); btn('◀ 10 ms',()=>{ p.off=Math.max(0,p.off-0.01); });
+    btn('10 ms ▶',()=>{ p.off+=0.01; }); btn('temps ▶',()=>{ p.off+=bt; },'avancer d\'un temps'); btn('↺ 0',()=>{ p.off=0; },'remettre au début');
+    btn(p.mute?'🔇 coupé':'🔈 son',()=>{ p.mute=!p.mute; }); btn(p.solo?'★ solo':'☆ solo',()=>{ p.solo=!p.solo; });
+    btn(PNL[p.pn]||PNL['?'],()=>{ p.pn=p.pn==='N'?'P':'N'; },'à moi / pas à moi');
+    btn('🗑',async()=>{ if(!confirm('Retirer « '+p.nom+' » de la table ? (ton fichier d\'origine n\'est pas touché)')) return; P.splice(sel,1); sel=Math.min(sel,P.length-1); cadrer(); });
+    const v=document.createElement('input'); v.type='range'; v.min='0'; v.max='2'; v.step='0.01'; v.value=String(p.gain); v.style.cssText='flex:1 1 140px';
+    v.oninput=()=>{ p.gain=parseFloat(v.value); dessiner(); }; v.onchange=()=>sauver();
+    const lv=document.createElement('span'); lv.className='mono'; lv.style.fontSize='12px'; lv.textContent='volume'; r.append(lv,v);
+    box.appendChild(r); }
+
+  /* ── lecture (Web Audio, chaque ligne à sa place) ── */
+  function contexte(){ if(!actx||actx.state==='closed') actx=new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==='suspended') actx.resume(); return actx; }
+  function arreter(){ if(lecture){ lecture.src.forEach(s=>{ try{ s.stop(); }catch(x){} }); lecture=null; } E('m9play').textContent='▶ Lecture'; }
+  function jouer(){ arreter(); if(!P.length){ dire('La table est vide.'); return; }
+    const c=contexte(), d0=(B>A&&(tete<A||tete>=B))?A:tete, f0=B>A?B:totale(); if(d0>=f0){ tete=B>A?A:0; return jouer(); }
+    const now=c.currentTime+0.06, src=[];
+    P.forEach(p=>{ if(!estActive(p)) return; const fp=p.off+p.dur; if(fp<=d0||p.off>=f0) return;
+      const b=c.createBuffer(2,p.L.length,SR); b.copyToChannel(p.L,0); b.copyToChannel(p.R,1);
+      const s=c.createBufferSource(); s.buffer=b; const g=c.createGain(); g.gain.value=p.gain; s.connect(g); g.connect(c.destination);
+      s.start(now+Math.max(0,p.off-d0), Math.max(0,d0-p.off), Math.min(fp,f0)-Math.max(p.off,d0)); src.push(s); });
+    lecture={src,t0:now,d0,f0}; E('m9play').textContent='❚❚ Pause'; requestAnimationFrame(anim); }
+  function anim(){ if(!lecture) return; const c=contexte(); tete=lecture.d0+Math.max(0,c.currentTime-lecture.t0);
+    if(tete>=lecture.f0){ if(E('m9boucle').checked&&B>A){ tete=A; jouer(); return; } tete=lecture.f0; arreter(); dessiner(); return; }
+    dessiner(); requestAnimationFrame(anim); }
+
+  /* ── export du moment choisi (ou de tout) ── */
+  function mixer(){ const a0=B>A?A:0, b0=B>A?B:totale(), n=Math.max(1,Math.round((b0-a0)*SR)), L=new Float32Array(n), R=new Float32Array(n);
+    P.forEach(p=>{ if(!estActive(p)) return; const d=Math.round((p.off-a0)*SR);
+      for(let j=Math.max(0,-d); j<p.L.length&&d+j<n; j++){ L[d+j]+=p.L[j]*p.gain; R[d+j]+=p.R[j]*p.gain; } });
+    let pk=0; for(let i=0;i<n;i++){ const u=Math.abs(L[i]),v=Math.abs(R[i]); if(u>pk) pk=u; if(v>pk) pk=v; }
+    if(pk>0){ const s=0.89/pk; for(let i=0;i<n;i++){ L[i]*=s; R[i]*=s; } }
+    const buf=new OAC(2,n,SR).createBuffer(2,n,SR); buf.copyToChannel(L,0); buf.copyToChannel(R,1); return {buf,a0,b0}; }
+  async function exporter(f){ if(!P.length){ dire('La table est vide.'); return; } const act=P.filter(estActive); if(!act.length){ dire('Toutes les lignes sont coupées.'); return; }
+    const {buf,a0,b0}=mixer(), pn=act.some(p=>p.pn==='P')?'PERSO_':act.every(p=>p.pn==='N')?'AMOI_':'ATRIER_';
+    const ms=t=>Math.floor(t/60)+'m'+String(Math.floor(t%60)).padStart(2,'0')+'s', base=pn+nomf(act.length+'-pistes_'+ms(a0)+'-'+ms(b0))+'_table';
+    if(pn==='PERSO_') dire('Contient du PAS À MOI : PERSO (Denon, live, pratique — jamais DistroKid).');
+    if(f==='wav'){ download(encodeWav(buf),base+'.wav'); dire((pn==='PERSO_'?'PERSO · ':'')+'WAV exporté : '+base+'.wav'); return; }
+    if(typeof encodeMp3!=='function'){ download(encodeWav(buf),base+'.wav'); dire('MP3 indisponible ici : WAV exporté.'); return; }
+    dire('Encodage MP3…'); const m=await encodeMp3(buf,192,q=>dire('Encodage MP3… '+Math.round(q*100)+' %')); download(m,base+'.mp3'); dire((pn==='PERSO_'?'PERSO · ':'')+'MP3 exporté : '+base+'.mp3'); }
+
+  /* ── boutons ── */
+  const garde=f=>()=>Promise.resolve(f()).catch(x=>dire('Erreur : '+(x&&x.message||x)));
+  E('m9son').onclick=()=>E('m9file').click();
+  E('m9file').onchange=e=>{ const f=[...e.target.files]; e.target.value=''; if(f.length) ajouterFichiers(f); };
+  E('m9sel').onclick=garde(ajouterSelection); E('m9mont').onclick=garde(ajouterMontage);
+  E('m9play').onclick=()=>{ if(lecture){ arreter(); dessiner(); } else jouer(); };
+  E('m9stop').onclick=()=>{ arreter(); tete=B>A?A:0; dessiner(); };
+  E('m9zp').onclick=()=>{ zoom=Math.min(64,zoom*1.6); vue=Math.max(0,tete-totale()*1.05/zoom/2); cadrer(); dessiner(); };
+  E('m9zm').onclick=()=>{ zoom=Math.max(1,zoom/1.6); cadrer(); dessiner(); };
+  E('m9vue').oninput=e=>{ vue=parseFloat(e.target.value)||0; dessiner(); };
+  E('m9aim').onchange=dessiner;
+  E('m9mp3').onclick=garde(()=>exporter('mp3')); E('m9wav').onclick=garde(()=>exporter('wav'));
+  E('m9vider').onclick=garde(async()=>{ if(!P.length||!confirm('Vider la table ? (tes fichiers d\'origine ne sont pas touchés)')) return; arreter(); P=[]; sel=-1; A=B=tete=0; await sauver(); cadrer(); dessiner(); panneau(); afficherSel(); dire('Table vidée.'); });
+  window.addEventListener('resize',()=>dessiner());
+  charger().then(()=>{ if(P.length){ sel=0; ouvrir(true); } cadrer(); dessiner(); panneau(); });
+  window.ggxML9={ajouter:p=>ajouter(p),liste:()=>P.map((p,i)=>({i,nom:p.nom,off:p.off,dur:p.dur,gain:p.gain,pn:p.pn,bpm:p.bpm,mute:p.mute,solo:p.solo})),
+    mixer:()=>mixer().buf,choisir:(a,b)=>{ A=a; B=b; afficherSel(); dessiner(); },decaler:(i,o)=>{ P[i].off=o; dessiner(); return sauver(); },vider:()=>{ P=[]; sel=-1; return sauver().then(dessiner); }};
+  console.info('GGX ML9 : table multipiste active (sons tels quels, décalage, sélection, export)');
+})();
+</script>
 <!-- GGX-ML1 fin -->
 </body>
 </html>
