@@ -1551,6 +1551,18 @@ function renderChords(){
   host.querySelectorAll("p").forEach(el => el.onclick = () => seek(S.chords[+el.dataset.i].t0));
   S.chordIdx = -1;
 }
+/* ML8v1 · suivre la ligne en cours DANS sa boîte seulement : la page ne bouge plus pendant la lecture ;
+   si tu viens de faire défiler la boîte toi-même, elle te laisse tranquille 4 s */
+function suivreDans(host, el){
+  if(!host || !el) return;
+  if(!host.__ggxEcoute){ host.__ggxEcoute = true; const m = () => { host.__ggxTouche = Date.now(); };
+    ["wheel","touchstart","touchmove","pointerdown"].forEach(ev => host.addEventListener(ev, m, {passive:true})); }
+  if(Date.now() - (host.__ggxTouche || 0) < 4000) return;
+  if(host.scrollHeight <= host.clientHeight + 2) return;
+  const hr = host.getBoundingClientRect(), er = el.getBoundingClientRect();
+  if(er.top < hr.top) host.scrollTop -= (hr.top - er.top) + 8;
+  else if(er.bottom > hr.bottom) host.scrollTop += (er.bottom - hr.bottom) + 8;
+}
 function highlightChord(){
   if(!S.chords.length) return;
   let idx = -1;
@@ -1560,7 +1572,7 @@ function highlightChord(){
   const host = $("chords");
   host.querySelectorAll("p.now").forEach(el => el.classList.remove("now"));
   const el = host.querySelector('p[data-i="'+idx+'"]');
-  if(el){ el.classList.add("now"); el.scrollIntoView({block:"nearest"}); }
+  if(el){ el.classList.add("now"); suivreDans(host, el); }
   $("chordNow").textContent = idx >= 0 ? "Accord : " + S.chords[idx].label : "";
 }
 
@@ -2067,7 +2079,7 @@ function highlightLyric(){
   const host = $("lyrics");
   host.querySelectorAll("p.now").forEach(el => el.classList.remove("now"));
   const el = host.querySelector('p[data-i="'+idx+'"]');
-  if(el){ el.classList.add("now"); el.scrollIntoView({block:"nearest"}); }
+  if(el){ el.classList.add("now"); suivreDans(host, el); }
 }
 const lrcStamp = t => {
   const m = Math.floor(t/60), r = t - m*60;
@@ -3590,6 +3602,29 @@ sizeCanvas();
     ajouterClip:c=>{ CLIPS.push(Object.assign({bpm:null,pn:'?',mode:'suite'},c)); return sauver().then(afficher); },vider:()=>{ CLIPS=[]; return sauver().then(afficher); },etirer};
   console.info('GGX ML7 : mélange parfait actif (tempo, niveau, mesure, par-dessus, à moi / pas à moi)');
   console.info('GGX ML6 : montage bout à bout actif (IndexedDB « ggx-montage »)');
+})();
+</script>
+<script>
+/* COUCHE ML8 — LECTURE SANS PRISON (ML8v1 · GGX v285) · additive
+   Un rond ❚❚ / ▶ en bas à droite apparaît à la première lecture et reste là : pause ou reprise
+   d'un pouce, où que tu sois dans la page (il appuie simplement sur le bouton Lecture du socle). */
+(function(){
+  'use strict';
+  if(typeof $!=='function'||!$('play')){ console.warn('GGX ML8 : socle absent — couche inactive'); return; }
+  const b=document.createElement('button'); b.id='ggxML8'; b.type='button'; b.title='Pause / lecture';
+  b.style.cssText='position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:9999;width:64px;height:64px;'
+    +'border-radius:50%;border:0;font-size:22px;font-weight:700;background:#3ee6c4;color:#0c0e12;box-shadow:0 4px 18px rgba(0,0,0,.45);display:none;cursor:pointer';
+  b.onclick=()=>$('play').click();
+  document.body.appendChild(b);
+  let vu=false;
+  function maj(){
+    const lit=(typeof S!=='undefined')&&!!S.playing;
+    if(lit) vu=true;
+    b.textContent=lit?'❚❚':'▶'; b.style.display=vu?'block':'none';
+    setTimeout(maj,250);
+  }
+  maj();
+  console.info('GGX ML8 : lecture sans prison (la page ne suit plus de force, bouton pause flottant)');
 })();
 </script>
 <!-- GGX-ML1 fin -->
