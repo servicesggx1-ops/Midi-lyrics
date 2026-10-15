@@ -3671,6 +3671,31 @@ sizeCanvas();
   const totale=()=>Math.max(1,...P.map(p=>p.off+p.dur));
   const estActive=p=>P.some(q=>q.solo)?p.solo:!p.mute;
   const bpmRef=()=>{ const p=P.find(q=>q.bpm); return p?p.bpm:null; };
+  /* ML10v1 · outils de la table : ↶ annuler, ✂ couper à la tête, ⟳ répéter, fondus, ⇄ au tempo, export aussi dans la banque */
+  const HIST=[];
+  function garder(){ HIST.push({P:P.map(p=>Object.assign({},p)),sel}); if(HIST.length>40) HIST.shift(); }
+  async function annuler(){ const h=HIST.pop(); if(!h){ dire('Rien à annuler.'); return; } P=h.P; sel=Math.min(h.sel,P.length-1); await sauver(); cadrer(); dessiner(); panneau(); dire('Annulé.'); }
+  function couper(i,t){ const p=P[i], k=Math.round((t-p.off)*SR);
+    if(k<SR*0.05||k>p.L.length-SR*0.05){ dire('Place la tête (touche la règle) sur ce son, puis ✂.'); return false; }
+    const a=prep(Object.assign({},p,{L:p.L.slice(0,k),R:p.R.slice(0,k)})), b=prep(Object.assign({},p,{L:p.L.slice(k),R:p.R.slice(k),off:p.off+k/SR,nom:p.nom+' (b)'}));
+    P.splice(i,1,a,b); sel=i+1; dire('Coupé en deux à '+fmt(t)+' : la 2e partie est sur la ligne '+(i+2)+'.'); return true; }
+  function repeter(i,n){ const p=P[i], m=p.L.length, L=new Float32Array(m*n), R=new Float32Array(m*n);
+    for(let j=0;j<n;j++){ L.set(p.L,j*m); R.set(p.R,j*m); }
+    const deja=+((p.nom.match(/ ×(\d+)$/)||[0,1])[1]);
+    P[i]=prep(Object.assign({},p,{L,R,nom:p.nom.replace(/ ×\d+$/,'')+' ×'+(deja*n)})); dire('Ligne '+(i+1)+' répétée ×'+n+' bout à bout.'); }
+  function fondu(i,entree){ const p=P[i], L=p.L.slice(), R=p.R.slice(), n=Math.min(L.length,Math.round((entree?0.25:0.5)*SR));
+    for(let j=0;j<n;j++){ const g=j/n; if(entree){ L[j]*=g; R[j]*=g; } else { const k=L.length-1-j; L[k]*=g; R[k]*=g; } }
+    P[i]=prep(Object.assign({},p,{L,R})); dire(entree?'Fondu d\'entrée (0,25 s).':'Fondu de sortie (0,5 s).'); }
+  function auTempo(i){ const p=P[i], ref=(P.find((q,j)=>j!==i&&q.bpm)||{}).bpm;
+    if(!ref){ dire('Aucune autre ligne n\'a de tempo connu : rien à suivre.'); return false; }
+    let b=p.bpm; if(!b){ b=parseFloat(prompt('Tempo de « '+p.nom+' » (BPM) ?','')); if(!(b>=50&&b<=220)){ dire('Tempo non donné : rien changé.'); return false; } }
+    if(Math.abs(b-ref)<0.01){ dire('Déjà au tempo de la table ('+ref+' BPM).'); return false; }
+    if(Math.abs(b/ref-1)>0.25){ dire('Écart de tempo trop grand (plus de 25 %) : rien changé.'); return false; }
+    if(!window.ggxML6||typeof window.ggxML6.etirer!=='function'){ dire('Étirement indisponible (mélange parfait absent).'); return false; }
+    const x=window.ggxML6.etirer({L:p.L,R:p.R},b/ref); P[i]=prep(Object.assign({},p,{L:x.L,R:x.R,bpm:ref}));
+    dire('Ligne '+(i+1)+' : '+b+' → '+ref+' BPM, hauteur gardée.'); return true; }
+  async function versBanque(blob,nom,pn){ try{ if(!window.ggxML5) return false; await window.ggxML5.ajouter(new File([blob],nom,{type:blob.type||'audio/wav'}));
+    const x=(await window.ggxML5.liste()).find(v=>v.nom===nom); if(x&&pn!=='?'&&window.ggxML5.pnFixer) await window.ggxML5.pnFixer(x.id,pn); return true; }catch(e){ console.warn('GGX ML10 : banque',e); return false; } }
 
   /* ── ajouter ── */
   async function decoder(buf){ const b=await new OAC(2,SR,SR).decodeAudioData(buf); let src=b;
@@ -3702,7 +3727,7 @@ sizeCanvas();
    +'<button id="m9son" type="button" class="primary">＋ Un son</button><input id="m9file" type="file" multiple accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac" style="display:none">'
    +'<button id="m9sel" type="button">＋ La sélection</button><button id="m9mont" type="button">＋ Le montage</button></div>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.5rem">'
-   +'<button id="m9play" type="button" class="primary">▶ Lecture</button><button id="m9stop" type="button">■</button>'
+   +'<button id="m9play" type="button" class="primary">▶ Lecture</button><button id="m9stop" type="button">■</button><button id="m9undo" type="button" title="annuler">↶</button>'
    +'<span id="m9t" class="mono" style="font-size:13px">0:00.0</span>'
    +'<label style="font-size:13px"><input type="checkbox" id="m9boucle"> boucle</label><label style="font-size:13px"><input type="checkbox" id="m9aim" checked> aimanter au temps</label></div>'
    +'<div style="display:flex;gap:.4rem;align-items:center;margin-top:.5rem"><button id="m9zm" type="button" class="btn-sm">−</button><button id="m9zp" type="button" class="btn-sm">＋</button>'
@@ -3759,7 +3784,7 @@ sizeCanvas();
     if(t>=p.off&&t<=p.off+p.dur){ geste={type:'piste',i,x0:x,y0:y,off0:p.off,bouge:false}; cv.setPointerCapture(e.pointerId); } else geste=null;
     panneau(); dessiner(); });
   cv.addEventListener('pointermove',e=>{ if(!geste) return; const {x,y}=pos(e);
-    if(geste.type==='piste'){ if(!geste.bouge&&Math.abs(x-geste.x0)<6) return; geste.bouge=true; e.preventDefault();
+    if(geste.type==='piste'){ if(!geste.bouge&&Math.abs(x-geste.x0)<6) return; if(!geste.bouge) garder(); geste.bouge=true; e.preventDefault();
       P[geste.i].off=Math.max(0,aimanter(geste.off0+(x-geste.x0)/pps())); dessiner(); panneau(); }
     else if(geste.type==='regle'&&Math.abs(x-geste.x0)>5){ const t=Math.max(0,ts(x)); A=Math.min(geste.t0,t); B=Math.max(geste.t0,t); dessiner(); afficherSel(); } });
   function fin(e){ if(!geste) return; const {x}=pos(e);
@@ -3780,7 +3805,11 @@ sizeCanvas();
     btn('10 ms ▶',()=>{ p.off+=0.01; }); btn('temps ▶',()=>{ p.off+=bt; },'avancer d\'un temps'); btn('↺ 0',()=>{ p.off=0; },'remettre au début');
     btn(p.mute?'🔇 coupé':'🔈 son',()=>{ p.mute=!p.mute; }); btn(p.solo?'★ solo':'☆ solo',()=>{ p.solo=!p.solo; });
     btn(PNL[p.pn]||PNL['?'],()=>{ p.pn=p.pn==='N'?'P':'N'; },'à moi / pas à moi');
-    btn('🗑',async()=>{ if(!confirm('Retirer « '+p.nom+' » de la table ? (ton fichier d\'origine n\'est pas touché)')) return; P.splice(sel,1); sel=Math.min(sel,P.length-1); cadrer(); });
+    btn('✂ couper',()=>{ garder(); if(!couper(sel,tete)) HIST.pop(); },'couper ce son à la tête de lecture (touche la règle pour la placer)');
+    btn('⟳ ×2',()=>{ garder(); repeter(sel,2); },'répéter ce son 2 fois bout à bout'); btn('⟳ ×4',()=>{ garder(); repeter(sel,4); },'répéter ce son 4 fois bout à bout');
+    btn('fondu ↗',()=>{ garder(); fondu(sel,true); },'faire monter le son au début (0,25 s)'); btn('fondu ↘',()=>{ garder(); fondu(sel,false); },'éteindre le son à la fin (0,5 s)');
+    btn('⇄ au tempo',()=>{ garder(); if(!auTempo(sel)) HIST.pop(); },'étirer ce son au tempo de la table, hauteur gardée');
+    btn('🗑',async()=>{ if(!confirm('Retirer « '+p.nom+' » de la table ? (ton fichier d\'origine n\'est pas touché)')) return; garder(); P.splice(sel,1); sel=Math.min(sel,P.length-1); cadrer(); });
     const v=document.createElement('input'); v.type='range'; v.min='0'; v.max='2'; v.step='0.01'; v.value=String(p.gain); v.style.cssText='flex:1 1 140px';
     v.oninput=()=>{ p.gain=parseFloat(v.value); dessiner(); }; v.onchange=()=>sauver();
     const lv=document.createElement('span'); lv.className='mono'; lv.style.fontSize='12px'; lv.textContent='volume'; r.append(lv,v);
@@ -3812,9 +3841,10 @@ sizeCanvas();
     const {buf,a0,b0}=mixer(), pn=act.some(p=>p.pn==='P')?'PERSO_':act.every(p=>p.pn==='N')?'AMOI_':'ATRIER_';
     const ms=t=>Math.floor(t/60)+'m'+String(Math.floor(t%60)).padStart(2,'0')+'s', base=pn+nomf(act.length+'-pistes_'+ms(a0)+'-'+ms(b0))+'_table';
     if(pn==='PERSO_') dire('Contient du PAS À MOI : PERSO (Denon, live, pratique — jamais DistroKid).');
-    if(f==='wav'){ download(encodeWav(buf),base+'.wav'); dire((pn==='PERSO_'?'PERSO · ':'')+'WAV exporté : '+base+'.wav'); return; }
+    const pnc=pn==='PERSO_'?'P':pn==='AMOI_'?'N':'?';
+    if(f==='wav'){ const bw=encodeWav(buf); download(bw,base+'.wav'); const ok=await versBanque(bw,base+'.wav',pnc); dire((pn==='PERSO_'?'PERSO · ':'')+'WAV exporté : '+base+'.wav'+(ok?' · aussi dans 🎸 Ma banque':'')); return; }
     if(typeof encodeMp3!=='function'){ download(encodeWav(buf),base+'.wav'); dire('MP3 indisponible ici : WAV exporté.'); return; }
-    dire('Encodage MP3…'); const m=await encodeMp3(buf,192,q=>dire('Encodage MP3… '+Math.round(q*100)+' %')); download(m,base+'.mp3'); dire((pn==='PERSO_'?'PERSO · ':'')+'MP3 exporté : '+base+'.mp3'); }
+    dire('Encodage MP3…'); const m=await encodeMp3(buf,192,q=>dire('Encodage MP3… '+Math.round(q*100)+' %')); download(m,base+'.mp3'); const ok=await versBanque(m,base+'.mp3',pnc); dire((pn==='PERSO_'?'PERSO · ':'')+'MP3 exporté : '+base+'.mp3'+(ok?' · aussi dans 🎸 Ma banque':'')); }
 
   /* ── boutons ── */
   const garde=f=>()=>Promise.resolve(f()).catch(x=>dire('Erreur : '+(x&&x.message||x)));
@@ -3823,17 +3853,20 @@ sizeCanvas();
   E('m9sel').onclick=garde(ajouterSelection); E('m9mont').onclick=garde(ajouterMontage);
   E('m9play').onclick=()=>{ if(lecture){ arreter(); dessiner(); } else jouer(); };
   E('m9stop').onclick=()=>{ arreter(); tete=B>A?A:0; dessiner(); };
+  E('m9undo').onclick=garde(annuler);
   E('m9zp').onclick=()=>{ zoom=Math.min(64,zoom*1.6); vue=Math.max(0,tete-totale()*1.05/zoom/2); cadrer(); dessiner(); };
   E('m9zm').onclick=()=>{ zoom=Math.max(1,zoom/1.6); cadrer(); dessiner(); };
   E('m9vue').oninput=e=>{ vue=parseFloat(e.target.value)||0; dessiner(); };
   E('m9aim').onchange=dessiner;
   E('m9mp3').onclick=garde(()=>exporter('mp3')); E('m9wav').onclick=garde(()=>exporter('wav'));
-  E('m9vider').onclick=garde(async()=>{ if(!P.length||!confirm('Vider la table ? (tes fichiers d\'origine ne sont pas touchés)')) return; arreter(); P=[]; sel=-1; A=B=tete=0; await sauver(); cadrer(); dessiner(); panneau(); afficherSel(); dire('Table vidée.'); });
+  E('m9vider').onclick=garde(async()=>{ if(!P.length||!confirm('Vider la table ? (tes fichiers d\'origine ne sont pas touchés)')) return; garder(); arreter(); P=[]; sel=-1; A=B=tete=0; await sauver(); cadrer(); dessiner(); panneau(); afficherSel(); dire('Table vidée.'); });
   window.addEventListener('resize',()=>dessiner());
   charger().then(()=>{ if(P.length){ sel=0; ouvrir(true); } cadrer(); dessiner(); panneau(); });
   window.ggxML9={ajouter:p=>ajouter(p),liste:()=>P.map((p,i)=>({i,nom:p.nom,off:p.off,dur:p.dur,gain:p.gain,pn:p.pn,bpm:p.bpm,mute:p.mute,solo:p.solo})),
     mixer:()=>mixer().buf,choisir:(a,b)=>{ A=a; B=b; afficherSel(); dessiner(); },decaler:(i,o)=>{ P[i].off=o; dessiner(); return sauver(); },vider:()=>{ P=[]; sel=-1; return sauver().then(dessiner); }};
+  window.ggxML9.outils={annuler,couper:(i,t)=>{ garder(); return couper(i,t); },repeter:(i,n)=>{ garder(); repeter(i,n); },fondu:(i,e)=>{ garder(); fondu(i,e); },auTempo:i=>{ garder(); return auTempo(i); }};
   console.info('GGX ML9 : table multipiste active (sons tels quels, décalage, sélection, export)');
+  console.info('GGX ML10 : outils de la table (annuler, couper, répéter, fondus, au tempo, export vers la banque)');
 })();
 </script>
 <!-- GGX-ML1 fin -->
