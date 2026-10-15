@@ -3644,7 +3644,7 @@ sizeCanvas();
   if(typeof $!=='function'||typeof encodeWav!=='function'||typeof download!=='function'||!$('loadCard')||!window.indexedDB){
     console.warn('GGX ML9 : socle absent — couche inactive'); return;
   }
-  const SR=44100, LH=58, RH=24, BASE='ggx-multipiste', MAG='pistes';
+  const SR=44100, LH=58, RH=34, BASE='ggx-multipiste', MAG='pistes';
   const COUL=['#3ee6c4','#f2b84b','#7aa2ff','#ff7a90','#b48cff','#7ee07e','#ff9f5a','#5ad1ff'];
   const OAC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
   let P=[], sel=-1, zoom=1, vue=0, A=0, B=0, tete=0, lecture=null, actx=null, geste=null;
@@ -3697,13 +3697,60 @@ sizeCanvas();
   async function versBanque(blob,nom,pn){ try{ if(!window.ggxML5) return false; await window.ggxML5.ajouter(new File([blob],nom,{type:blob.type||'audio/wav'}));
     const x=(await window.ggxML5.liste()).find(v=>v.nom===nom); if(x&&pn!=='?'&&window.ggxML5.pnFixer) await window.ggxML5.pnFixer(x.id,pn); return true; }catch(e){ console.warn('GGX ML10 : banque',e); return false; } }
 
+  /* ML13v1 · audiocutter : enlever / copier / coller / insérer / doubler / exporter un son seul */
+  let PRESSE=null;   /* le morceau copié : {nom,L,R,pn,bpm} */
+  function pousser(t,d){ /* ouvre un trou de d secondes au temps t : ce qui part après se décale, ce qui est à cheval est coupé en deux */
+    for(let i=P.length-1;i>=0;i--){ const p=P[i]; if(p.off>=t-1e-6){ p.off+=d; continue; }
+      const k=Math.round((t-p.off)*SR); if(k>0&&k<p.L.length){ const b=prep(Object.assign({},p,{L:p.L.slice(k),R:p.R.slice(k),off:t+d,nom:p.nom.replace(/ \(b\)$/,'')+' (b)'}));
+        P[i]=prep(Object.assign({},p,{L:p.L.slice(0,k),R:p.R.slice(0,k)})); P.splice(i+1,0,b); } } }
+  function joint(L,k){ const f=Math.min(132,k,L.length-k); for(let j=0;j<f;j++){ const g=j/f; L[k-1-j]*=g; L[k+j]*=g; } }
+  function enlever(a,b,seule){ /* retire [a,b] d'un son (seule = sa ligne) ou de toute la table ; le reste se resserre */
+    const d=b-a, out=[]; let k=0;
+    P.forEach((p,i)=>{ if(seule!=null&&i!==seule){ out.push(p); return; }
+      const n=p.L.length, ka=Math.max(0,Math.min(n,Math.round((a-p.off)*SR))), kb=Math.max(0,Math.min(n,Math.round((b-p.off)*SR)));
+      if(kb<=ka){ if(seule==null&&p.off>=b-1e-6) p.off=Math.max(0,p.off-d); out.push(p); return; }
+      k++; const m=n-(kb-ka); if(m<SR*0.05) return;
+      const L=new Float32Array(m), R=new Float32Array(m); L.set(p.L.subarray(0,ka)); L.set(p.L.subarray(kb),ka); R.set(p.R.subarray(0,ka)); R.set(p.R.subarray(kb),ka);
+      if(ka>0&&ka<m){ joint(L,ka); joint(R,ka); }
+      out.push(prep(Object.assign({},p,{L,R,off:(p.off<a||seule!=null)?p.off:a}))); });
+    P=out; sel=Math.min(sel,P.length-1); return k; }
+  function partBleue(p){ const n=p.L.length; if(!(B>A)||B<=p.off||A>=p.off+p.dur) return null;
+    return {a:Math.max(0,Math.round((A-p.off)*SR)),b:Math.min(n,Math.round((B-p.off)*SR))}; }
+  function copier(i){ const p=P[i]; if(!p) return; const z=partBleue(p)||{a:0,b:p.L.length};
+    PRESSE={nom:p.nom+(z.b-z.a<p.L.length?' (copie '+((z.b-z.a)/SR).toFixed(2)+' s)':' (copie)'),L:p.L.slice(z.a,z.b),R:p.R.slice(z.a,z.b),pn:p.pn,bpm:p.bpm};
+    dire('Copié : '+((z.b-z.a)/SR).toFixed(2)+' s de « '+p.nom+' » · 📋 coller → à la suite, par-dessus ou insérer au trait rouge.'); majOut(); }
+  async function coller(m){ if(!PRESSE) return; garder(); const d=PRESSE.L.length/SR, q=P[sel];
+    const off=m==='suite'?(q?q.off+q.dur:totale()*(P.length?1:0)):tete; if(m==='insere') pousser(off,d);
+    P.push(prep(Object.assign({gain:1,mute:false,solo:false},PRESSE,{L:PRESSE.L.slice(),R:PRESSE.R.slice(),off}))); sel=P.length-1;
+    await sauver(); cadrer(); dessiner(); panneau();
+    dire('Collé sur la ligne '+P.length+' à '+fmt(off)+(m==='insere'?' · tout ce qui suivait est poussé de '+d.toFixed(2)+' s':m==='suite'?' · à la suite':' · par-dessus')+' · ↶ pour revenir.'); }
+  function doubler(i){ const p=P[i]; P.splice(i+1,0,prep(Object.assign({},p,{L:p.L.slice(),R:p.R.slice(),off:p.off+p.dur,nom:p.nom.replace(/ \(×\d+\)$/,'')+' (bis)'}))); sel=i+1;
+    dire('Doublé : la copie part à '+fmt(p.off+p.dur)+', juste à la suite (ligne '+(i+2)+').'); }
+  async function exporterSon(i,f){ const p=P[i]; if(!p) return; const z=partBleue(p)||{a:0,b:p.L.length}, n=z.b-z.a;
+    const L=new Float32Array(n), R=new Float32Array(n); let pk=0; for(let j=0;j<n;j++){ L[j]=p.L[z.a+j]*p.gain; R[j]=p.R[z.a+j]*p.gain; pk=Math.max(pk,Math.abs(L[j]),Math.abs(R[j])); }
+    if(pk>0.98){ const s=0.98/pk; for(let j=0;j<n;j++){ L[j]*=s; R[j]*=s; } }
+    const buf=new OAC(2,n,SR).createBuffer(2,n,SR); buf.copyToChannel(L,0); buf.copyToChannel(R,1);
+    const pn=p.pn==='P'?'PERSO_':p.pn==='N'?'AMOI_':'ATRIER_', base=(/^(PERSO|AMOI|ATRIER)_/i.test(p.nom)?'':pn)+nomf(p.nom)+(n<p.L.length?'_coupe':'');
+    let blob, nom; if(f==='mp3'&&typeof encodeMp3==='function'){ dire('Encodage MP3…'); blob=await encodeMp3(buf,192,q=>dire('Encodage MP3… '+Math.round(q*100)+' %')); nom=base+'.mp3'; }
+    else { blob=encodeWav(buf); nom=base+'.wav'; }
+    download(blob,nom); const ok=await versBanque(blob,nom,p.pn);
+    dire('⬇ '+nom+' · '+(n/SR).toFixed(2)+' s'+(ok?' · aussi dans 🎸 Ma banque':'')+(p.pn==='P'?' · PERSO, jamais DistroKid':'')); }
+  function majOut(){ const box=E('m9out'); if(!box) return; box.textContent='';
+    const b=(l,f,ti,pr)=>{ const x=document.createElement('button'); x.type='button'; x.className='btn-sm'+(pr?' primary':''); x.textContent=l; if(ti) x.title=ti;
+      x.onclick=()=>Promise.resolve(f()).catch(e=>dire(String(e&&e.message||e))); box.appendChild(x); };
+    if(B>A&&P.length) b('✂ enlever ce moment partout',async()=>{ garder(); const k=enlever(A,B,null); const d=B-A; A=B=0; tete=Math.min(tete,totale()); await sauver(); cadrer(); afficherSel(); dessiner(); panneau(); dire(k?'Moment enlevé de '+k+' son(s), '+d.toFixed(2)+' s : tout ce qui suivait s\'est resserré · ↶ pour revenir.':'Rien ne joue dans ce moment : la suite s\'est seulement resserrée.'); },'retirer ce moment de toutes les lignes, la suite recule pour combler');
+    if(PRESSE){ const d=(PRESSE.L.length/SR).toFixed(2)+' s';
+      b('📋 ➜ à la suite',()=>coller('suite'),'coller '+d+' juste après le son choisi',true); b('📋 ⧉ par-dessus',()=>coller('dessus'),'coller '+d+' au trait rouge, sur une nouvelle ligne');
+      b('📋 ⇥ insérer',()=>coller('insere'),'insérer '+d+' au trait rouge : tout ce qui suit se pousse'); } }
+
   /* ── ajouter ── */
   async function decoder(buf){ const b=await new OAC(2,SR,SR).decodeAudioData(buf); let src=b;
     if(b.sampleRate!==SR){ const oc=new OAC(2,Math.ceil(b.duration*SR),SR), s=oc.createBufferSource(); s.buffer=b; s.connect(oc.destination); s.start(); src=await oc.startRendering(); }
     return {L:src.getChannelData(0).slice(), R:(src.numberOfChannels>1?src.getChannelData(1):src.getChannelData(0)).slice()}; }
   /* ML11v1 · la table au doigt : rétrécir par les poignées, par-dessus / à la suite, pincer pour zoomer, ajouter depuis la banque */
-  let MODE='suite', guide=null; try{ MODE=localStorage.getItem('ggxML11mode')==='tete'?'tete':'suite'; }catch(_){}
-  async function ajouter(p){ garder(); const der=P[P.length-1], off0=Math.max(0,p.off!=null?p.off:(MODE==='tete'?tete:(der?der.off+der.dur:0)));
+  let MODE='suite', guide=null; try{ MODE=({tete:'tete',insere:'insere'})[localStorage.getItem('ggxML11mode')]||'suite'; }catch(_){}
+  async function ajouter(p){ garder(); const der=P[P.length-1], off0=Math.max(0,p.off!=null?p.off:(MODE!=='suite'?tete:(der?der.off+der.dur:0)));
+    if(p.off==null&&MODE==='insere') pousser(off0,p.L.length/SR);   /* ML13v1 : insérer = tout ce qui suit le trait rouge se pousse */
     P.push(prep(Object.assign({gain:1,mute:false,solo:false,pn:'?',bpm:null},p,{off:off0}))); sel=P.length-1;
     if(P.length>1){ const vis=totale()*1.05/zoom; if(off0<vue||off0>vue+vis*0.8) vue=Math.max(0,off0-vis*0.2); }
     await sauver(); ouvrir(true); cadrer(); dessiner(); panneau(); }
@@ -3763,12 +3810,12 @@ sizeCanvas();
   /* ── écran ── */
   const SEC=document.createElement('section'); SEC.id='ggxML9'; SEC.className='panel';
   SEC.innerHTML='<details id="m9d"><summary style="cursor:pointer;font-weight:600">🎚 Table multipiste <span id="m9n" class="mono" style="font-weight:400;opacity:.7"></span></summary>'
-   +'<p class="note" style="margin:.4rem 0">Au doigt, comme CapCut : <b>glisse un son</b> pour le déplacer — il s\'aimante au début ou à la fin des autres (<b>par-dessus</b> ou <b>à la suite</b>) · touche un son puis <b>tire ses poignées blanches</b> pour le rétrécir · <b>pince à deux doigts</b> pour zoomer · glisse sur la règle pour choisir le moment, touche-la pour placer la tête. Sons pris tels quels, sans transcription MIDI.</p>'
+   +'<details style="margin:.3rem 0"><summary class="note" style="cursor:pointer">❔ Comment ça marche</summary><p class="note" style="margin:.4rem 0">Au doigt, comme CapCut : <b>glisse un son</b> pour le déplacer — il s\'aimante au début ou à la fin des autres (<b>par-dessus</b> ou <b>à la suite</b>) · touche un son puis <b>tire ses poignées blanches</b> pour le rétrécir · <b>pince à deux doigts</b> pour zoomer · glisse sur la règle pour choisir le moment, touche-la pour placer la tête. Sons pris tels quels, sans transcription MIDI. <b>Audiocutter</b> : glisse sur la règle pour mettre un moment en bleu (tire ses bords), puis ✂ enlever, ⧉ copier → 📋 coller à la suite, par-dessus ou ⇥ insérer.</p></details>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem">'
    +'<button id="m9son" type="button" class="primary">＋ Un son</button><input id="m9file" type="file" multiple accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac" style="display:none">'
    +'<button id="m9banq" type="button" class="primary">＋ De ma banque</button><button id="m9sel" type="button">＋ La sélection</button><button id="m9inst" type="button" title="chaque instrument de la tab ou du MIDI ouvert, isolé sur sa ligne">＋ Chaque instrument</button><button id="m9mont" type="button">＋ Le montage</button></div>'
    +'<div id="m9bl" style="display:none;margin-top:.4rem;max-height:280px;overflow:auto;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:.35rem"></div>'
-   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.45rem;font-size:13px"><span>Nouveau son :</span><button id="m9ms" type="button" class="btn-sm">➜ à la suite</button><button id="m9mt" type="button" class="btn-sm" title="le nouveau son part au trait rouge, par-dessus ce qui joue là">⧉ par-dessus</button></div>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.45rem;font-size:13px"><span>Nouveau son :</span><button id="m9ms" type="button" class="btn-sm">➜ à la suite</button><button id="m9mt" type="button" class="btn-sm" title="le nouveau son part au trait rouge, par-dessus ce qui joue là">⧉ par-dessus</button><button id="m9mi" type="button" class="btn-sm" title="le nouveau son entre au trait rouge et pousse tout ce qui suit">⇥ insérer</button></div>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.5rem">'
    +'<button id="m9play" type="button" class="primary">▶ Lecture</button><button id="m9stop" type="button">■</button><button id="m9undo" type="button" title="annuler">↶</button>'
    +'<span id="m9t" class="mono" style="font-size:13px">0:00.0</span>'
@@ -3776,7 +3823,7 @@ sizeCanvas();
    +'<div style="display:flex;gap:.4rem;align-items:center;margin-top:.5rem"><button id="m9zm" type="button" class="btn-sm">−</button><button id="m9zp" type="button" class="btn-sm">＋</button>'
    +'<input id="m9vue" type="range" min="0" max="0" step="0.01" value="0" style="flex:1 1 auto"></div>'
    +'<canvas id="m9cv" style="width:100%;display:block;margin-top:.4rem;border-radius:10px;touch-action:none;background:#0b0f16"></canvas>'
-   +'<div id="m9sel2" class="mono" style="font-size:12px;opacity:.85;margin-top:.3rem"></div>'
+   +'<div id="m9sel2" class="mono" style="font-size:12px;opacity:.85;margin-top:.3rem"></div><div id="m9out" style="display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.3rem"></div>'
    +'<div id="m9pan" style="margin-top:.4rem"></div>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem"><button id="m9mp3" type="button">⬇ MP3</button><button id="m9wav" type="button">⬇ WAV</button><button id="m9s8" type="button" class="primary" title="8 s en mesures entières depuis le moment choisi (ou le trait rouge), WAV 16 bits">⬇ seed 8 s</button><button id="m9s16" type="button" class="primary" title="16 s en mesures entières, WAV 16 bits">⬇ seed 16 s</button><button id="m9vider" type="button">Vider</button></div>'
    +'<div class="status" id="m9msg"></div></details>';
@@ -3819,7 +3866,7 @@ sizeCanvas();
     E('m9n').textContent=P.length?'· '+P.length+' son(s) · '+fmt(totale()):'';
     E('m9t').textContent=fmt(tete)+' / '+fmt(totale());
   }
-  function afficherSel(){ E('m9sel2').textContent=B>A?'Moment choisi : '+fmt(A)+' → '+fmt(B)+' ('+(B-A).toFixed(2)+' s) · touche la règle hors du bleu pour l\'effacer':''; }
+  function afficherSel(){ E('m9sel2').textContent=B>A?'Moment choisi : '+fmt(A)+' → '+fmt(B)+' ('+(B-A).toFixed(2)+' s) · tire ses bords sur la règle · touche la règle hors du bleu pour l\'effacer':'Glisse le doigt sur la règle (en haut) pour choisir un moment à couper, copier ou garder.'; majOut(); if(!geste) panneau(); }
   function aimanter(o){ const bpm=bpmRef(); if(!E('m9aim').checked||!bpm) return Math.round(o*100)/100; const g=60/bpm/4; return Math.round(o/g)*g; }
 
   /* ── gestes sur la table (ML11v1 · au doigt : glisser avec aimant, poignées pour rétrécir, pincer pour zoomer, défiler) ── */
@@ -3842,7 +3889,8 @@ sizeCanvas();
     dessiner(); panneau(); }
   cv.addEventListener('pointerdown',e=>{ const {x,y}=pos(e); doigts.set(e.pointerId,{x,y}); try{ cv.setPointerCapture(e.pointerId); }catch(_){}
     if(doigts.size>=2){ finGeste(true); const [a,b]=[...doigts.values()]; pince={d0:Math.max(24,Math.abs(a.x-b.x)),z0:zoom,tm:ts((a.x+b.x)/2)}; return; }
-    if(y<RH){ geste={type:'regle',x0:x,t0:Math.max(0,ts(x))}; return; }
+    if(y<RH){ if(B>A){ const da=Math.abs(x-tx(A)), db=Math.abs(x-tx(B)); if(Math.min(da,db)<=16){ geste={type:'bleu',fin:db<da}; return; } }
+      geste={type:'regle',x0:x,t0:accroche(Math.max(0,ts(x)),-1).t}; return; }
     const i=Math.floor((y-RH)/LH);
     if(i>=0&&i<P.length){ const p=P[i], va=tx(p.off), vb=tx(p.off+p.dur), etait=i===sel; sel=i;
       if(etait){ const dg=Math.abs(x-va), dd=Math.abs(x-vb), z=Math.max(18,Math.min(28,(vb-va)/3));
@@ -3868,13 +3916,15 @@ sizeCanvas();
       const p=P[geste.i], t=accroche(ts(x),geste.i), mn=Math.round(0.05*SR), k=Math.round((t.t-p.off)*SR), cut=p.cut||{a:0,b:geste.n};
       if(geste.droit) cut.b=Math.max(cut.a+mn,Math.min(geste.n,k)); else cut.a=Math.max(0,Math.min(cut.b-mn,k));
       p.cut=cut; guide=t.g; dessiner(); dire('Rétrécir : '+((cut.b-cut.a)/SR).toFixed(2)+' s gardées — lâche pour appliquer'); return; }
-    if(geste.type==='regle'&&Math.abs(x-geste.x0)>5){ const t=Math.max(0,ts(x)); A=Math.min(geste.t0,t); B=Math.max(geste.t0,t); dessiner(); afficherSel(); } });
+    if(geste.type==='bleu'){ e.preventDefault(); const a=accroche(Math.max(0,ts(x)),-1); guide=a.g; if(geste.fin) B=Math.max(A+0.02,a.t); else A=Math.max(0,Math.min(B-0.02,a.t)); dessiner(); afficherSel(); return; }
+    if(geste.type==='regle'&&Math.abs(x-geste.x0)>5){ const t=accroche(Math.max(0,ts(x)),-1); guide=t.g; A=Math.min(geste.t0,t.t); B=Math.max(geste.t0,t.t); dessiner(); afficherSel(); } });
   function lacher(e,annule){ doigts.delete(e.pointerId);
     if(pince){ if(doigts.size<2) pince=null; return; }
     if(!geste) return;
     if(geste.type==='regle'){ const {x}=pos(e);
       if(!annule&&Math.abs(x-geste.x0)<=5){ const t=Math.max(0,ts(x)); if(B>A&&(t<A||t>B)){ A=B=0; afficherSel(); } tete=t; if(lecture) jouer(); dessiner(); }
-      geste=null; return; }
+      geste=null; guide=null; dessiner(); panneau(); return; }
+    if(geste.type==='bleu'){ geste=null; guide=null; dessiner(); panneau(); return; }
     finGeste(annule); }
   cv.addEventListener('pointerup',e=>lacher(e,false)); cv.addEventListener('pointercancel',e=>lacher(e,true));
 
@@ -3885,23 +3935,33 @@ sizeCanvas();
     t.textContent='Ligne '+(sel+1)+' · '+p.nom+' · départ '+fmt(p.off)+' ('+p.off.toFixed(3)+' s)'+(p.bpm?' · '+p.bpm+' BPM':''); r.appendChild(t);
     const btn=(l,f,ti)=>{ const b=document.createElement('button'); b.type='button'; b.className='btn-sm'; b.textContent=l; if(ti) b.title=ti;
       b.onclick=()=>Promise.resolve(f()).then(()=>{ sauver(); dessiner(); panneau(); }).catch(x=>dire(String(x&&x.message||x))); r.appendChild(b); return b; };
-    const bt=60/(bpmRef()||120);
-    btn('◀ temps',()=>{ p.off=Math.max(0,p.off-bt); },'reculer d\'un temps'); btn('◀ 10 ms',()=>{ p.off=Math.max(0,p.off-0.01); });
-    btn('10 ms ▶',()=>{ p.off+=0.01; }); btn('temps ▶',()=>{ p.off+=bt; },'avancer d\'un temps'); btn('↺ 0',()=>{ p.off=0; },'remettre au début');
-    btn(p.mute?'🔇 coupé':'🔈 son',()=>{ p.mute=!p.mute; }); btn(p.solo?'★ solo':'☆ solo',()=>{ p.solo=!p.solo; });
-    btn(PNL[p.pn]||PNL['?'],()=>{ p.pn=p.pn==='N'?'P':'N'; },'à moi / pas à moi');
+    const bt=60/(bpmRef()||120), zb=partBleue(p);
+    const r2=document.createElement('div'); r2.style.cssText='display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;flex:1 1 100%'; let plus=false; try{ plus=localStorage.getItem('ggxML13plus')==='1'; }catch(_){}
     if(sel>0){ const q=P[sel-1], k=sel;
       btn('➜ à la suite',()=>{ garder(); p.off=q.off+q.dur; dire('Ligne '+(k+1)+' enchaîne à la fin de la ligne '+k+' ('+fmt(p.off)+').'); },'placer ce son juste après la fin de la ligne du dessus');
       btn('⧉ par-dessus',()=>{ garder(); p.off=q.off; dire('Ligne '+(k+1)+' part en même temps que la ligne '+k+' ('+fmt(p.off)+').'); },'faire partir ce son en même temps que la ligne du dessus'); }
-    btn('⇤ à la tête',()=>{ garder(); p.off=tete; },'faire partir ce son au trait rouge');
-    if(B>A&&A<p.off+p.dur&&B>p.off) btn('⇹ garder le bleu',()=>{ garder(); const n=p.L.length; p.cut={a:Math.max(0,Math.round((A-p.off)*SR)),b:Math.min(n,Math.round((B-p.off)*SR))}; rogner(sel); },'rétrécir ce son au moment choisi (en bleu sur la règle)');
-    if(sel>0) btn('▲',()=>{ garder(); const k=sel; [P[k-1],P[k]]=[P[k],P[k-1]]; sel=k-1; },'monter cette ligne');
-    if(sel<P.length-1) btn('▼',()=>{ garder(); const k=sel; [P[k+1],P[k]]=[P[k],P[k+1]]; sel=k+1; },'descendre cette ligne');
-    btn('✂ couper',()=>{ garder(); if(!couper(sel,tete)) HIST.pop(); },'couper ce son à la tête de lecture (touche la règle pour la placer)');
-    btn('⟳ ×2',()=>{ garder(); repeter(sel,2); },'répéter ce son 2 fois bout à bout'); btn('⟳ ×4',()=>{ garder(); repeter(sel,4); },'répéter ce son 4 fois bout à bout');
-    btn('fondu ↗',()=>{ garder(); fondu(sel,true); },'faire monter le son au début (0,25 s)'); btn('fondu ↘',()=>{ garder(); fondu(sel,false); },'éteindre le son à la fin (0,5 s)');
-    btn('⇄ au tempo',()=>{ garder(); if(!auTempo(sel)) HIST.pop(); },'étirer ce son au tempo de la table, hauteur gardée');
+    btn('⇤ au trait rouge',()=>{ garder(); p.off=tete; },'faire partir ce son au trait rouge');
+    btn('✂ ici',()=>{ garder(); if(!couper(sel,tete)) HIST.pop(); },'couper ce son en deux au trait rouge');
+    if(zb){ btn('⇹ garder le bleu',()=>{ garder(); p.cut={a:zb.a,b:zb.b}; rogner(sel); },'ne garder que le moment choisi (en bleu)');
+      btn('✂ enlever le bleu',()=>{ garder(); enlever(A,B,sel); dire('Moment enlevé de la ligne '+(sel+1)+', le reste du son se resserre · ↶ pour revenir.'); },'retirer le moment choisi de ce son seulement'); }
+    btn(zb?'⧉ copier le bleu':'⧉ copier',()=>copier(sel),'copier ce son (ou son moment en bleu) pour le coller ailleurs');
+    btn('⎘ doubler',()=>{ garder(); doubler(sel); },'une copie juste à la suite');
+    btn('⬇ ce son',()=>exporterSon(sel,'wav'),'télécharger ce son seul (ou son moment en bleu) en WAV');
+    btn(p.mute?'🔇 coupé':'🔈 son',()=>{ p.mute=!p.mute; }); btn(p.solo?'★ solo':'☆ solo',()=>{ p.solo=!p.solo; });
     btn('🗑',async()=>{ if(!confirm('Retirer « '+p.nom+' » de la table ? (ton fichier d\'origine n\'est pas touché)')) return; garder(); P.splice(sel,1); sel=Math.min(sel,P.length-1); cadrer(); });
+    const tp=document.createElement('button'); tp.type='button'; tp.className='btn-sm'; tp.textContent=plus?'⋯ moins':'⋯ plus'; r.appendChild(tp);
+    tp.onclick=()=>{ plus=!plus; try{ localStorage.setItem('ggxML13plus',plus?'1':'0'); }catch(_){} r2.style.display=plus?'flex':'none'; tp.textContent=plus?'⋯ moins':'⋯ plus'; };
+    const dans=(l,f,ti)=>r2.appendChild(btn(l,f,ti));
+    dans('◀ temps',()=>{ p.off=Math.max(0,p.off-bt); },'reculer d\'un temps'); dans('◀ 10 ms',()=>{ p.off=Math.max(0,p.off-0.01); });
+    dans('10 ms ▶',()=>{ p.off+=0.01; }); dans('temps ▶',()=>{ p.off+=bt; },'avancer d\'un temps'); dans('↺ 0',()=>{ p.off=0; },'remettre au début');
+    if(sel>0) dans('▲',()=>{ garder(); const k=sel; [P[k-1],P[k]]=[P[k],P[k-1]]; sel=k-1; },'monter cette ligne');
+    if(sel<P.length-1) dans('▼',()=>{ garder(); const k=sel; [P[k+1],P[k]]=[P[k],P[k+1]]; sel=k+1; },'descendre cette ligne');
+    dans('⟳ ×2',()=>{ garder(); repeter(sel,2); },'répéter ce son 2 fois bout à bout'); dans('⟳ ×4',()=>{ garder(); repeter(sel,4); },'répéter ce son 4 fois bout à bout');
+    dans('fondu ↗',()=>{ garder(); fondu(sel,true); },'faire monter le son au début (0,25 s)'); dans('fondu ↘',()=>{ garder(); fondu(sel,false); },'éteindre le son à la fin (0,5 s)');
+    dans('⇄ au tempo',()=>{ garder(); if(!auTempo(sel)) HIST.pop(); },'étirer ce son au tempo de la table, hauteur gardée');
+    dans('⬇ ce son MP3',()=>exporterSon(sel,'mp3'),'télécharger ce son seul (ou son moment en bleu) en MP3');
+    dans(PNL[p.pn]||PNL['?'],()=>{ p.pn=p.pn==='N'?'P':'N'; },'à moi / pas à moi');
+    r2.style.display=plus?'flex':'none'; r.appendChild(r2);
     const v=document.createElement('input'); v.type='range'; v.min='0'; v.max='2'; v.step='0.01'; v.value=String(p.gain); v.style.cssText='flex:1 1 140px';
     v.oninput=()=>{ p.gain=parseFloat(v.value); dessiner(); }; v.onchange=()=>sauver();
     const lv=document.createElement('span'); lv.className='mono'; lv.style.fontSize='12px'; lv.textContent='volume'; r.append(lv,v);
@@ -3965,10 +4025,10 @@ sizeCanvas();
         ul.appendChild(b); }); };
     f.oninput=remplir; remplir(); }
   E('m9banq').onclick=garde(montrerBanque);
-  const marquer=()=>{ E('m9ms').classList.toggle('primary',MODE==='suite'); E('m9mt').classList.toggle('primary',MODE==='tete'); };
+  const marquer=()=>{ E('m9ms').classList.toggle('primary',MODE==='suite'); E('m9mt').classList.toggle('primary',MODE==='tete'); E('m9mi').classList.toggle('primary',MODE==='insere'); };
   const choisirMode=m=>{ MODE=m; try{ localStorage.setItem('ggxML11mode',m); }catch(_){} marquer();
-    dire(m==='suite'?'Les nouveaux sons s\'enchaînent à la fin de la dernière ligne.':'Les nouveaux sons partent au trait rouge, par-dessus ce qui joue là.'); };
-  E('m9ms').onclick=()=>choisirMode('suite'); E('m9mt').onclick=()=>choisirMode('tete'); marquer();
+    dire(m==='suite'?'Les nouveaux sons s\'enchaînent à la fin de la dernière ligne.':m==='insere'?'Les nouveaux sons entrent au trait rouge et poussent tout ce qui suit (comme un audiocutter).':'Les nouveaux sons partent au trait rouge, par-dessus ce qui joue là.'); };
+  E('m9ms').onclick=()=>choisirMode('suite'); E('m9mt').onclick=()=>choisirMode('tete'); E('m9mi').onclick=()=>choisirMode('insere'); marquer();
   E('m9zp').onclick=()=>{ zoom=Math.min(64,zoom*1.6); vue=Math.max(0,tete-totale()*1.05/zoom/2); cadrer(); dessiner(); };
   E('m9zm').onclick=()=>{ zoom=Math.max(1,zoom/1.6); cadrer(); dessiner(); };
   E('m9vue').oninput=e=>{ vue=parseFloat(e.target.value)||0; dessiner(); };
@@ -3987,6 +4047,11 @@ sizeCanvas();
   console.info('GGX ML11 : table au doigt (rétrécir, par-dessus / à la suite, pincer, banque en un toucher)');
   window.ggxML9.ml12={instruments:ajouterInstruments,seed};
   console.info('GGX ML12 : instruments isolés d\'une tab sur la table, seeds 8 / 16 s en WAV');
+  window.ggxML9.ml13={enlever:(a,b,i)=>{ garder(); const k=enlever(a,b,i==null?null:i); return sauver().then(()=>{ cadrer(); dessiner(); panneau(); return k; }); },
+    copier:i=>copier(i),coller,doubler:i=>{ garder(); doubler(i); return sauver().then(()=>{ dessiner(); panneau(); }); },exporterSon,tete:t=>{ if(t!=null){ tete=t; dessiner(); } return tete; },
+    choisir:i=>{ sel=i; panneau(); dessiner(); },presse:()=>PRESSE&&{nom:PRESSE.nom,dur:PRESSE.L.length/SR}};
+  afficherSel();
+  console.info('GGX ML13 : audiocutter (bleu à bords mobiles, enlever, copier, coller, insérer, doubler, exporter un son)');
 })();
 </script>
 <!-- GGX-ML1 fin -->
