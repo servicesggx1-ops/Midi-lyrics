@@ -3717,6 +3717,43 @@ sizeCanvas();
     dire('Rendu de '+(b-a).toFixed(1)+' s…'); const buf=await renderSelection(a,b,parseFloat(($('gain')||{}).value||0.9)), n=Math.round((b-a)*SR);
     const L=new Float32Array(n), R=new Float32Array(n); L.set(buf.getChannelData(0).subarray(0,n)); R.set((buf.numberOfChannels>1?buf.getChannelData(1):buf.getChannelData(0)).subarray(0,n));
     await ajouter({nom:(S.fileName||'tab')+' · '+a.toFixed(1)+'-'+b.toFixed(1)+' s',L,R,pn:window.ggxPN||'?',bpm:S.bpm||null}); dire('Sélection ajoutée sur la ligne '+P.length+'.'); }
+  /* ML12v1 · tab (.gp) / MIDI : chaque instrument isolé sur sa ligne, l'un par-dessus l'autre ; seeds 8 / 16 s en WAV */
+  async function ajouterInstruments(){
+    if(typeof renderSelection!=='function'||typeof S==='undefined'||!S.duration||!S.parts||!S.parts.length){ dire('Ouvre d\'abord une tab (.gp) ou un MIDI ; choisis un moment, ou rien pour tout le morceau.'); return; }
+    let a=Math.max(0,parseFloat(($('inA')||{}).value)||0), b=Math.min(S.duration,parseFloat(($('inB')||{}).value)||S.duration);
+    if(b-a<0.2){ a=0; b=S.duration; }
+    const parts=S.parts.filter(p=>p.stats&&p.stats.count>0).slice(0,12);
+    if(!parts.length){ dire('Aucune piste avec des notes.'); return; }
+    const sauve=S.parts.map(p=>({solo:p.solo,mute:p.mute})), der=P[P.length-1], off0=MODE==='tete'?tete:(der?der.off+der.dur:0);
+    const base=(S.fileName||'tab').replace(/\.[^.]+$/,''), n=Math.round((b-a)*SR);
+    const pn=window.ggxPN||(/\.(gp|gpx|gp3|gp4|gp5|gtp)$/i.test(S.fileName||'')?'P':'?'); let k=0, i=0;
+    try{
+      for(const p of parts){
+        S.parts.forEach(q=>{ q.solo=(q===p); q.mute=false; });
+        dire('Rendu de « '+p.label+' » ('+(++i)+'/'+parts.length+')…');
+        const buf=await renderSelection(a,b,parseFloat(($('gain')||{}).value||0.9));
+        const L=new Float32Array(n), R=new Float32Array(n); L.set(buf.getChannelData(0).subarray(0,n)); R.set((buf.numberOfChannels>1?buf.getChannelData(1):buf.getChannelData(0)).subarray(0,n));
+        let pk=0; for(let j=0;j<n;j+=32){ const v=Math.abs(L[j]); if(v>pk) pk=v; }
+        if(pk<1e-4) continue;
+        await ajouter({nom:base+' · '+p.label,L,R,pn,bpm:S.bpm||null,off:off0}); k++;
+      }
+    } finally {
+      S.parts.forEach((q,j)=>{ q.solo=sauve[j].solo; q.mute=sauve[j].mute; });
+      if(typeof afterMix==='function') try{ afterMix(); }catch(_){}
+    }
+    dire(k+' instrument(s) de « '+base+' » posés l\'un par-dessus l\'autre, chacun sur sa ligne'+(pn==='P'?' · PAS À MOI (une tab est la composition de quelqu\'un d\'autre)':'')+' · coupe, rétrécis, mélange avec tes sons, puis ⬇ seed.'); }
+  async function seed(sec){
+    if(!P.length){ dire('La table est vide.'); return; }
+    const act=P.filter(estActive); if(!act.length){ dire('Toutes les lignes sont coupées.'); return; }
+    const bpm=bpmRef(), t0=B>A?A:tete, bar=bpm?240/bpm:0, k=bpm?Math.max(1,Math.round(sec/bar)):0, d=bpm?k*bar:sec, a0=A, b0=B;
+    A=t0; B=t0+d;
+    try{
+      const {buf}=mixer(), pn=act.some(p=>p.pn==='P')?'PERSO_':act.every(p=>p.pn==='N')?'AMOI_':'ATRIER_';
+      const nom=pn+nomf((bpm?Math.round(bpm)+'BPM_':'')+act.length+'-pistes')+'_SEED'+String(sec).padStart(2,'0')+'s.wav';
+      const bw=encodeWav(buf); download(bw,nom); const ok=await versBanque(bw,nom,pn==='PERSO_'?'P':pn==='AMOI_'?'N':'?');
+      dire('Seed '+sec+' s : '+(bpm?k+' mesure(s) = '+d.toFixed(2)+' s':d+' s (tempo inconnu)')+' depuis '+fmt(t0)+' · WAV 16 bits / 44,1 kHz · '+nom+(ok?' · aussi dans 🎸 Ma banque':''));
+    } finally { A=a0; B=b0; afficherSel(); dessiner(); }
+  }
   async function ajouterMontage(){
     if(!window.ggxML6||!window.ggxML6.liste().length){ dire('Le montage bout à bout est vide.'); return; }
     const l=window.ggxML6.liste(), buf=window.ggxML6.assembler();
@@ -3729,7 +3766,7 @@ sizeCanvas();
    +'<p class="note" style="margin:.4rem 0">Au doigt, comme CapCut : <b>glisse un son</b> pour le déplacer — il s\'aimante au début ou à la fin des autres (<b>par-dessus</b> ou <b>à la suite</b>) · touche un son puis <b>tire ses poignées blanches</b> pour le rétrécir · <b>pince à deux doigts</b> pour zoomer · glisse sur la règle pour choisir le moment, touche-la pour placer la tête. Sons pris tels quels, sans transcription MIDI.</p>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem">'
    +'<button id="m9son" type="button" class="primary">＋ Un son</button><input id="m9file" type="file" multiple accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac" style="display:none">'
-   +'<button id="m9banq" type="button" class="primary">＋ De ma banque</button><button id="m9sel" type="button">＋ La sélection</button><button id="m9mont" type="button">＋ Le montage</button></div>'
+   +'<button id="m9banq" type="button" class="primary">＋ De ma banque</button><button id="m9sel" type="button">＋ La sélection</button><button id="m9inst" type="button" title="chaque instrument de la tab ou du MIDI ouvert, isolé sur sa ligne">＋ Chaque instrument</button><button id="m9mont" type="button">＋ Le montage</button></div>'
    +'<div id="m9bl" style="display:none;margin-top:.4rem;max-height:280px;overflow:auto;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:.35rem"></div>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.45rem;font-size:13px"><span>Nouveau son :</span><button id="m9ms" type="button" class="btn-sm">➜ à la suite</button><button id="m9mt" type="button" class="btn-sm" title="le nouveau son part au trait rouge, par-dessus ce qui joue là">⧉ par-dessus</button></div>'
    +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.5rem">'
@@ -3741,7 +3778,7 @@ sizeCanvas();
    +'<canvas id="m9cv" style="width:100%;display:block;margin-top:.4rem;border-radius:10px;touch-action:none;background:#0b0f16"></canvas>'
    +'<div id="m9sel2" class="mono" style="font-size:12px;opacity:.85;margin-top:.3rem"></div>'
    +'<div id="m9pan" style="margin-top:.4rem"></div>'
-   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem"><button id="m9mp3" type="button">⬇ MP3</button><button id="m9wav" type="button">⬇ WAV</button><button id="m9vider" type="button">Vider</button></div>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem"><button id="m9mp3" type="button">⬇ MP3</button><button id="m9wav" type="button">⬇ WAV</button><button id="m9s8" type="button" class="primary" title="8 s en mesures entières depuis le moment choisi (ou le trait rouge), WAV 16 bits">⬇ seed 8 s</button><button id="m9s16" type="button" class="primary" title="16 s en mesures entières, WAV 16 bits">⬇ seed 16 s</button><button id="m9vider" type="button">Vider</button></div>'
    +'<div class="status" id="m9msg"></div></details>';
   const lc=$('loadCard'); lc.parentNode.insertBefore(SEC,lc.nextSibling);
   const E=id=>SEC.querySelector('#'+id); function dire(t){ E('m9msg').textContent=t||''; }
@@ -3937,6 +3974,7 @@ sizeCanvas();
   E('m9vue').oninput=e=>{ vue=parseFloat(e.target.value)||0; dessiner(); };
   E('m9aim').onchange=dessiner;
   E('m9mp3').onclick=garde(()=>exporter('mp3')); E('m9wav').onclick=garde(()=>exporter('wav'));
+  E('m9inst').onclick=garde(ajouterInstruments); E('m9s8').onclick=garde(()=>seed(8)); E('m9s16').onclick=garde(()=>seed(16));
   E('m9vider').onclick=garde(async()=>{ if(!P.length||!confirm('Vider la table ? (tes fichiers d\'origine ne sont pas touchés)')) return; garder(); arreter(); P=[]; sel=-1; A=B=tete=0; await sauver(); cadrer(); dessiner(); panneau(); afficherSel(); dire('Table vidée.'); });
   window.addEventListener('resize',()=>dessiner());
   charger().then(()=>{ if(P.length){ sel=0; ouvrir(true); } cadrer(); dessiner(); panneau(); });
@@ -3947,6 +3985,8 @@ sizeCanvas();
   console.info('GGX ML10 : outils de la table (annuler, couper, répéter, fondus, au tempo, export vers la banque)');
   window.ggxML9.doigt={mode:()=>MODE,choisirMode,selection:()=>sel,vue:()=>({zoom,vue,pps:pps(),tx:t=>tx(t)})};
   console.info('GGX ML11 : table au doigt (rétrécir, par-dessus / à la suite, pincer, banque en un toucher)');
+  window.ggxML9.ml12={instruments:ajouterInstruments,seed};
+  console.info('GGX ML12 : instruments isolés d\'une tab sur la table, seeds 8 / 16 s en WAV');
 })();
 </script>
 <!-- GGX-ML1 fin -->
